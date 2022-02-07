@@ -1,0 +1,250 @@
+---
+title: "J2seq analysis"
+author: "Chao Di, dic@email.chop.edu"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc_depth: 1
+    number_sections: true
+---
+
+```{r setup, include=FALSE, echo = FALSE, cache = FALSE}
+# replace with path where you want the results to be
+knitr::opts_knit$set(root.dir="/Users/dic/Documents/Weitzman lab/J2seq")
+```
+
+## Abstract {-}
+This is the analysis of J2seq data, aim to uncover the role of dsRNA produced by Ad5 or Ad5 mutant(E4) in human cells.
+Human cell line (A549) was infected with Adenovirus, either wildtype serotype number 5 Adenovirus (Ad5) or a mutant of Ad5 that is lacking a region of viral proteins in the E4 region (Delta-E4, often just shortened to E4). Post infection the virus has "taken over" the infected cell so completely that more than half of all mRNA is viral. There are 80 million total mappable reads across all 8 libraries vs the about 400 million we expected.
+
+```{r include=TRUE,echo=FALSE,message = FALSE, warning = FALSE}
+setwd("/Users/dic/Documents/Weitzman lab/J2seq")
+library(dplyr)
+library(ggplot2)
+library(pheatmap)
+library(VennDiagram)
+library(DESeq2)
+library(edgeR)
+library(EnhancedVolcano)
+library(fgsea)
+library(gprofiler2)
+library(tibble)
+library(data.table)
+library(gprofiler2)
+# library(clusterProfiler)
+```
+
+
+### Using DESeq2 for the analysis {-}
+Get RNA expression (normalized, transformed using DESeq2) values from the RNA-seq, and do DE
+```{r, include=TRUE,echo=FALSE,message = FALSE, warning=FALSE}
+
+## load data, featureCount reads
+cts <- read.table("J2seq_featureCount.tsv", header=TRUE, check.names=FALSE)
+colnames(cts) <- colnames(cts) %>% gsub(".merged.dedup.sorted.bam", "", .) %>% gsub("\\.", "_", .)
+
+# colData and countData must have the same sample order, but this is ensured by the way we create the count matrix
+coldata <- read.table("sample_contrast.tsv",header=TRUE, check.names=FALSE)
+coldata$sample <- coldata$sample %>% gsub("-", "_", .)
+coldata$lib_type <- coldata$lib_type %>% gsub("-","_", .)
+cat("-- This is the experiment design matrix: \n")
+coldata
+
+rownames(coldata)=coldata$sample
+coldata$phenotype <- factor(coldata$phenotype)
+coldata$lib_type <- factor(coldata$lib_type)
+
+## construct DESeq dataset with contrast design
+cat("-- Use design = ~ phenotype + lib_type + phenotype:lib_type to build the Negative Binomial GLM (generalized linear model)...\n")
+dds <- DESeqDataSetFromMatrix(countData=cts, colData=coldata, design = ~ phenotype + lib_type + phenotype:lib_type)
+#dds <- DESeqDataSetFromMatrix(countData=cts, colData=coldata, design = ~ lib_type + phenotype + lib_type:phenotype)
+dds$phenotype = relevel(dds$phenotype, "wt")
+dds$lib_type = relevel(dds$lib_type, "input")
+
+# remove uninformative columns
+# dds <- dds[rowSums(counts(dds)) > 1, ]
+# rows with at least one gene >=10
+dds <- dds[rowSums(counts(dds) >= 10) > 0, ]
+
+## main function: GLM modeling and differential test
+dds <- DESeq(dds, fitType = "local")
+cat("-- Using wt and input as the contrast reference, these are the coefficients:\n ")
+resultsNames(dds)
+
+## ---- raw count normalization and count transformation, log2 scale, either rlog or vst
+# RNA-seq
+vsd <- vst(dds, blind=FALSE)
+norm_cts <- assay(vsd)
+# cat("Normalized read counts by DESeq2:\n")
+# head(norm_cts)
+norm_cts <- as.data.frame(cbind(GeneID=rownames(norm_cts), norm_cts))
+cat("Do reads normalization and transformation (log2 scale) using rlog or vst, and output a table to *deseq2_cts_normalized_transformed.tsv*. \n")
+write.table(norm_cts, file="deseq2_cts_normalized_transformed.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+
+```
+
+### PCA plot {-}
+The PCA plot shows the samples in the 2D plane spanned by their first two principal components. This type of plot is useful for visualizing the overall effect of experimental covariates and batch effects.
+
+```{r, include=TRUE,echo=FALSE,message = FALSE}
+## visualizations ##
+# pca plot
+# pdf("pca-plot.pdf")
+pcaData <- plotPCA(vsd, intgroup=c("lib_type","phenotype"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=phenotype, shape=lib_type)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed()
+# dev.off()
+```
+
+### Heatmap for expression matrix {-}
+Heatmap showing the expressions of the most variable genes (top 50 here),  also do clustering between samples. This gives us the information of which samples and which genes are close to each other. Can also applied to differential genes in later analysis.
+
+```{r, include=TRUE,fig.height=8, fig.width=6,echo=FALSE,message = FALSE}
+# heatmap of the count matrix
+select <- head(order(-rowVars(assay(vsd))),50) # most variable genes
+pdata <- assay(vsd)[select,]
+df <- as.data.frame(colData(dds)[,c("phenotype","lib_type")])
+rownames(df) <- rownames(colData(dds))
+colnames(df) <- c("phenotype","lib_type")
+# pdf("heatmap_expression_matrix.pdf")
+pheatmap(pdata, cluster_rows=TRUE, show_rownames=TRUE,
+         cluster_cols=TRUE, annotation_col=df)
+# dev.off()
+```
+
+
+### Differential expression between J2-RIP vs input {-}
+
+```{r, include=TRUE,echo=FALSE,message = FALSE, warning=FALSE}
+
+# ---- the RIP effect for wt (reference)
+#res_wt <- results(dds, name="lib_type_J2_RIP_vs_input")
+res_wt <- results(dds, contrast = c("lib_type", "J2_RIP", "input"))
+res_wt_up <- res_wt[which(res_wt$padj<0.05 & res_wt$log2FoldChange>1),]
+cat("-- J2-RIP vs input for wt, # of enriched genes (padj<0.05, log2FC>1): \n")
+dim(res_wt_up)[1]
+res_wt_up
+res_wt_up <- as.data.frame(cbind(gene_name=rownames(res_wt_up), res_wt_up))
+write.table(res_wt_up, file="deseq2_J2RIP_enriched_genes_wt.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+
+
+# ---- the RIP effect for e4 
+res_e4 <- results(dds, list(c("lib_type_J2_RIP_vs_input", "phenotypee4.lib_typeJ2_RIP")))
+res_e4_up <- res_e4[which(res_e4$padj<0.05 & res_e4$log2FoldChange>1),]
+cat("-- J2-RIP vs input for e4, # of enriched genes (padj<0.05, log2FC>1):  \n")
+dim(res_e4_up)[1]
+res_e4_up
+res_e4_up <- as.data.frame(cbind(gene_name=rownames(res_e4_up), res_e4_up))
+write.table(res_e4_up, file="deseq2_J2RIP_enriched_genes_e4.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+
+
+# ---- intersect of wt and e4 enriched genes
+cat("-- Venn diagram showing the overlap genes between wt and e4: \n")
+x=list(wt=rownames(res_wt_up), e4=rownames(res_e4_up))
+p <- venn.diagram(x, filename=NULL,  lwd = 2,
+        lty = 'blank', fill = c("red","green"),
+        cex = 2, # numbers
+        cat.cex = 3, cat.fontface = "bold", at.default.pos = "outer", # labels
+        print.mode=c("raw","percent"))
+grid.newpage()
+grid.draw(p)
+
+core_genes = merge(as.data.frame(res_wt_up), as.data.frame(res_e4_up), by='row.names')
+colnames(core_genes) <- colnames(core_genes) %>% gsub(".x", ".wt", .) %>% gsub(".y", ".e4", .) 
+cat("Generate a table *deseq2_J2RIP_enriched_genes_wt_and_e4.tsv*: \n")
+colnames(core_genes)[1] <- "gene_name" 
+write.table(core_genes, file="deseq2_J2RIP_enriched_genes_wt_and_e4.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+head(core_genes)
+
+
+```
+
+### Functional analysis for J2 RIP enriched genes {-}
+
+* Functional enrichment analysis by `gprofilter2`(here) or `clusterProfiler`
+The abbreviation of the datasource for the term. Currently, the possible datasources are
+GO:MF - Gene Ontology Molecular Function branch  
+GO:BP - Gene Ontology Biological Process branch  
+GO:CC - Gene Ontology Cellular Component branch  
+KEGG - KEGG pathways  
+REAC - Reactome pathways  
+WP - WikiPathways  
+TF - Transfac transcription factor binding site predictions  
+MIRNA - mirTarBase miRNA targets  
+HPA - Human Protein Atlas expression data  
+CORUM - Manually annotated protein complexes from mammalian organisms.  
+HP - Human Phenotype Ontology, a standardized vocabulary of phenotypic abnormalities encountered in human disease.  
+
+```{r include=TRUE, echo=FALSE, message=FALSE, warning = FALSE}
+gprofilter_func <- function(genelist, pval_cutoff, dataName){
+    gostres <- gost(query = list("DEGs"=rownames(genelist)),
+                    organism = "hsapiens", ordered_query = FALSE,
+                    multi_query = FALSE, significant = TRUE, exclude_iea = FALSE,
+                    measure_underrepresentation = FALSE, evcodes = FALSE,
+                    user_threshold = 0.05, correction_method = "g_SCS",
+                    domain_scope = "annotated", custom_bg = NULL,
+                    numeric_ns = "", sources = NULL, as_short_link = FALSE)
+    
+     gostres$result <-  gostres$result %>% filter(term_size >=5 & term_size<=600)
+
+    gostres_select <- gostres$result[,c("source", "term_name", "term_size", "intersection_size","p_value")] 
+    write.table(gostres_select, file=paste0(dataName, "_GOres_fulltable.tsv"), sep="\t", row.names = FALSE, col.names=TRUE, quote=FALSE)
+    
+    # cat("This is an interactive Manhattan-like-plot:\n")
+    # gostplot(gostres, capped = TRUE, interactive = TRUE)
+    
+    cat("Select most significant terms shown in the table:")
+    p <- gostplot(gostres, capped = TRUE, interactive = FALSE)
+    pp <- publish_gostplot(p, highlight_terms = gostres$result[gostres$result$p_value<pval_cutoff,]$term_id,
+                            height = NA, width = NA, filename = NULL)
+    # publish_gosttable(gostres, use_colors = TRUE, 
+    #                     show_columns = c("source", "term_name", "term_size", "intersection_size"),
+    #                     filename = NULL)
+    ## save the full table
+    # gotable <- publish_gosttable(gostres, highlight_terms = gostres$result[gostres$result$p_value<1e-8,]$term_id,
+    # use_colors = TRUE, show_columns = c("source", "term_name", "term_size", "intersection_size"), filename = "GOres_table.pdf")
+    
+    
+    # return a short-link with the setting parameters to be analyzed on the web tool g:Profilter
+    gostres_link <- gost(query = rownames(genelist), 
+                    organism = "hsapiens", ordered_query = FALSE, 
+                    multi_query = FALSE, significant = TRUE, exclude_iea = FALSE, 
+                    measure_underrepresentation = FALSE, evcodes = FALSE, 
+                    user_threshold = 0.05, correction_method = "g_SCS", 
+                    domain_scope = "annotated", custom_bg = NULL, 
+                    numeric_ns = "", sources = NULL, as_short_link = TRUE)
+    cat("Analyze the data with settings on g:Profilter:", gostres_link, "\n")
+}
+```
+
+* For genes enriched in both wt and e4
+```{r include=TRUE, echo=FALSE, message=FALSE, warning = FALSE, fig.height=25, fig.width=12}
+cat(paste0("both wt and e4 genes: ", length(core_genes$Row.names),"\n"))
+cat("Showing the most enriched with pvalue cutoff p<1e-10, see full table in attached! \n")
+gprofilter_func(genelist=core_genes, pval_cutoff=1e-10, dataName="genes_enriched_for_both_wt_e4")
+
+```
+
+
+* For genes enriched in wt but not in e4
+```{r include=TRUE, echo=FALSE, message=FALSE, warning = FALSE, fig.height=14, fig.width=12}
+res_wt_up_only <- res_wt_up[!rownames(res_wt_up) %in% rownames(res_e4_up),]
+cat(paste0("wt not e4 genes: ", length(res_wt_up_only$padj),"\n"))
+cat("Only show the most enriched terms with pvalue cutoff p<1e-2: \n")
+gprofilter_func(genelist=res_wt_up_only, pval_cutoff=0.01, dataName="genes_enriched_for_wt_only")
+
+```
+
+* For genes enriched in e4 wt but not in wt
+```{r include=TRUE, echo=FALSE, message=FALSE, warning = FALSE, fig.height=14, fig.width=12}
+
+res_e4_up_only <- res_e4_up[!rownames(res_e4_up) %in% rownames(res_wt_up),]
+cat(paste0("e4 not wt genes: ", length(res_e4_up_only$padj),"\n"))
+cat("Only show the most enriched terms with pvalue cutoff p<1e-2: \n")
+gprofilter_func(genelist=res_e4_up_only, pval_cutoff=1e-2, dataName="genes_enriched_for_e4_only")
+
+```

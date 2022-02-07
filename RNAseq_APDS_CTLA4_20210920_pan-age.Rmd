@@ -1,0 +1,294 @@
+---
+title: "Differential expression (DESeq2) and GSEA nalysis for APDS and CTLA4 (pan-age)"
+author: "Chao Di, dic@email.chop.edu"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc_depth: 1
+    number_sections: yes
+  pdf_document:
+    toc_depth: '1'
+---
+## Abstract {-}
+This project is for dissecting the transcriptome changes between patients with single gene mutations (STAT3 and STAT1) and HC. The methods used here for differential gene expression analysis is DESeq2.
+
+```{r setup, include=FALSE, echo = FALSE, cache = FALSE, warning=FALSE}
+# replace with path where you want the results be
+knitr::opts_knit$set(root.dir="/Users/dic/Documents/Sarah Henrickson lab/20210920_Peyton_SHenrickson_RNAseq/")
+```
+
+```{r include=FALSE,echo=FALSE,message = FALSE}
+# set home dir when test in console 
+setwd("/Users/dic/Documents/Sarah Henrickson lab/20210920_Peyton_SHenrickson_RNAseq/")
+library(DESeq2)
+library(apeglm)
+library(ashr)
+library(pheatmap)
+library(genefilter)
+library(ggplot2)
+library(RColorBrewer)
+library(fdrtool)
+library(EnhancedVolcano)
+library(fgsea)
+library(KEGGREST)
+library(EnrichmentBrowser)
+library(dplyr)
+library(tibble)
+library(data.table)
+library(org.Hs.eg.db)
+```
+
+
+### Overview of the data {-}
+* Load read counts and do data transformation
+Supply with raw read counts table "all_readCount.tsv" calculated from STAR/HT-seq, and sample info "sample_contrast.tsv", do value transformation and normalization (variance stabilizing transformations (VST)) in DESeq2.
+
+```{r message=FALSE, warning=FALSE}
+cts <- read.table("all_readCount.tsv", header=TRUE, row.names="gene", check.names=FALSE)
+colnames(cts) <- sub("_S.+","",colnames(cts))
+coldata <- read.table("sample_table.tsv", header=TRUE, row.names="sample",sep="\t", check.names=FALSE)
+head(coldata)
+
+# load the counts with no design
+dds <- DESeqDataSetFromMatrix(countData=cts, colData=coldata, design=~1)
+
+# genes have at least 10 reads in at least 5 samples
+dds <- dds[rowSums(counts(dds) >= 10) >= 5,]
+
+# normalization and pre-processing
+dds <- DESeq(dds)
+
+# raw count normalization
+norm_counts <- counts(dds, normalized=TRUE) 
+# count transformation, log2 scale, either rlog or vst
+vsd <- vst(dds, blind=FALSE)
+cat("The data values after transformation:\n")
+head(assay(vsd)[,1:6])
+
+```
+
+* PCA plot
+The PCA plot shows the samples in the 2D plane spanned by their first two principal components. This type of plot is useful for visualizing the overall effect of experimental covariates and batch effects.
+```{r message = FALSE, warning=FALSE}
+# APDS_CTLA4
+vsd_APDS_CTLA4 <- vsd[, vsd$APDS_CTLA4_group %in% c("Young", "Adults")]
+pcaData <- plotPCA(vsd_APDS_CTLA4, intgroup=c("disease","APDS_CTLA4_group","cell_type"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, shape=APDS_CTLA4_group, color=disease)) +
+  geom_point(size =3, aes(fill=disease, alpha=cell_type))+ 
+  geom_point(size =3) + 
+  scale_shape_manual(values=c(22,24)) + 
+  scale_alpha_manual(values=c('Tnn'=0.05, 'Tn'=1)) + 
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed()
+
+```
+
+* Heatmap for expression matrix
+Heatmap showing the expressions of the most variable genes (top 35 here), optional to do clustering between samples. This gives us the information of which samples and which genes are close to each other.
+
+```{r fig.height=9, fig.width=9, message=FALSE, include=TRUE}
+# APDS_CTLA4
+select <- head(order(-rowVars(assay(vsd_APDS_CTLA4))),50) # most variable genes
+pdata <- assay(vsd_APDS_CTLA4)[select,]
+df <- as.data.frame(colData(dds)[,c("disease","APDS_CTLA4_group","cell_type")]) %>% filter(APDS_CTLA4_group!="NA")
+pheatmap(
+  pdata,
+  cluster_rows = TRUE,
+  show_rownames = TRUE,
+  cluster_cols = TRUE,
+  annotation_col = df )
+
+
+```
+
+
+### Differential expression analysis by `DESeq2` {-}
+Calculation of expression values (log2 scale), transformed by variance stabilizing transformations (VST).
+Setup contrast as disease vs HC in different age groups: Young, Adults, Older, Oldest etc (grouping variate for different diseases). Export tables with the standard DESeq2 result format including "baseMean log2FoldChange lfcSE stat pvalue padj" plus the "Log fold change shrinked" normalized readcounts )
+
+* APDS_CTLA4 
+```{r message=FALSE, warning = FALSE}
+dds_APDS_CTLA4 <- dds[,dds$APDS_CTLA4_group %in% c("Young", "Adults")]
+dds_APDS_CTLA4$disease <- factor(dds_APDS_CTLA4$disease, levels = c("HC","APDS","CTLA4"))
+dds_APDS_CTLA4$cell_type <- factor(dds_APDS_CTLA4$cell_type, levels = c("Tn","Tnn"))
+
+dds_APDS_CTLA4$group <- factor(paste0(dds_APDS_CTLA4$disease, dds_APDS_CTLA4$cell_type))
+design(dds_APDS_CTLA4) <- ~ group
+dds_APDS_CTLA4 <- DESeq(dds_APDS_CTLA4)
+resultsNames(dds_APDS_CTLA4)
+
+res_APDS_Tnn <- results(dds_APDS_CTLA4, contrast=c("group", "APDSTnn","HCTnn"))
+res_APDS_Tn <- results(dds_APDS_CTLA4, contrast=c("group", "APDSTn","HCTn"))
+
+res_CTLA4_Tnn <- results(dds_APDS_CTLA4, contrast=c("group", "CTLA4Tnn","HCTnn"))
+res_CTLA4_Tn <- results(dds_APDS_CTLA4, contrast=c("group", "CTLA4Tn","HCTn"))
+
+table(res_APDS_Tnn$padj<0.1)
+res_APDS_Tnn[!is.na(res_APDS_Tnn$padj) & res_APDS_Tnn$padj<0.1,]
+res_APDS_Tnn[rownames(res_APDS_Tnn) %in% c("PIK3CD"),]
+
+table(res_APDS_Tn$padj<0.1)
+res_APDS_Tn[!is.na(res_APDS_Tn$padj) & res_APDS_Tn$padj<0.1,]
+res_APDS_Tn[rownames(res_APDS_Tn) %in% c("PIK3CD"),]
+
+table(res_CTLA4_Tnn$padj<0.1)
+res_CTLA4_Tnn[!is.na(res_CTLA4_Tnn$padj) & res_CTLA4_Tnn$padj<0.1,]
+res_CTLA4_Tnn[rownames(res_CTLA4_Tnn) %in% c("PIK3CD"),]
+
+table(res_CTLA4_Tn$padj<0.1)
+res_CTLA4_Tn[!is.na(res_CTLA4_Tn$padj) & res_CTLA4_Tn$padj<0.1,]
+res_CTLA4_Tn[rownames(res_CTLA4_Tn) %in% c("PIK3CD"),]
+
+```
+
+
+### Volcano plots {-}
+```{r message=FALSE, warning = FALSE, fig.height=8, fig.width=7, fig.show="hold"}
+for (each in c("APDS_Tnn", "APDS_Tn", "CTLA4_Tnn", "CTLA4_Tn")){
+  comp <- sub("_"," CD8", each)
+  res = get(paste0("res_",each))
+  top10 = res[order(res$padj),][1:20,]
+  
+  # only label padj<0.1 as significant
+keyvals <- ifelse(
+     rownames(res) %in% rownames(res[!is.na(res$padj) & res$padj<0.1,]), 'red', 'blue')
+names(keyvals)[keyvals == 'red'] <- 'padj<0.1'
+names(keyvals)[keyvals == 'blue'] <- 'Non-significant'
+
+  volcano <- EnhancedVolcano(
+      res,
+      lab = rownames(res),
+      selectLab = rownames(top10),
+      x = 'log2FoldChange',
+      y = 'pvalue',
+      ylim = c(0, max(-log10(res$pvalue) + 1)),
+      title = comp,
+      subtitle = "",
+      pCutoff = 0.05,
+      FCcutoff = 2,
+      pointSize = 2,
+      labSize = 4,
+      colCustom = keyvals,
+      drawConnectors = TRUE,
+      widthConnectors = 0.5,
+      typeConnectors = 'open',
+      colConnectors = 'grey') +
+      theme(plot.title = element_text(hjust = 0.5))
+
+  print(volcano)
+}
+```
+
+### Gene set enrichment analyis {-}
+```{r include=FALSE, echo=FALSE, message=FALSE, warning = FALSE}
+# create a function for GSEA and plot
+gseafunc <- function(gmtfile, pval_cutoff, gene_sets){
+  for (each in c("APDS_Tnn", "APDS_Tn", "CTLA4_Tnn", "CTLA4_Tn")){
+      # print comparison
+      comp <- sub("_"," CD8", each)
+      print(comp)
+      res = get(paste0("res_",each))
+      res <- res[order(res$stat,decreasing = T),]
+      res$symbol = rownames(res)
+      ranked_genes <- res %>% as.data.frame() %>% dplyr::select(symbol, stat) %>% deframe() 
+      fgseaRes <- fgsea(pathways = gmtfile, 
+                        stats = ranked_genes,
+                        minSize=15,
+                        maxSize=600,
+                        eps = 0)
+      
+      # select most significant pathways to show in a table plot
+      # topPathwaysUp <- fgseaRes[ES > 0][head(order(pval), n=10), pathway]
+      # topPathwaysDown <- fgseaRes[ES < 0][head(order(pval), n=10), pathway]
+      # topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+      # plotGseaTable(gmtfile[topPathways], ranked_genes, fgseaRes, gseaParam = 0.5)
+    
+      # select independent pathways, and filter by pval_cutoff
+      collapsedPathways <- collapsePathways(fgseaRes[order(pval)][padj < pval_cutoff], gmtfile, ranked_genes)
+      fgseaRes_filtered <- fgseaRes[pathway %in% collapsedPathways$mainPathways][order(-NES), ]
+      print(head(fgseaRes_filtered))
+      
+      # plot in fgsea table style
+      # mainPathways <- fgseaRes[pathway %in% collapsedPathways$mainPathways][order(-NES), pathway]
+      # plotGseaTable(gmtfile[mainPathways], ranked_genes, fgseaRes, gseaParam = 0.5)
+        
+      # output the table
+      fwrite(fgseaRes_filtered, file=paste0("./APDS_CTLA4/GSEA/enriched_genesets_", gene_sets,"_",comp,".tsv"), sep="\t", sep2=c("",",",""))
+      
+      p <- ggplot(fgseaRes_filtered, aes(reorder(pathway, NES), NES, color=padj)) +
+           geom_point(aes(size=size)) +
+           scale_color_gradient(low="red", high="blue") +
+           #scale_fill_manual(values = c("Down-regulated" = "dodgerblue","Up-regulated" = "firebrick") ) +
+           coord_flip() +
+           labs(x="Pathway", y="Normalized Enrichment Score", title= comp, color="adjust.p", size="Count") + 
+           theme_minimal()
+      print(p)
+    }
+}
+```
+
+* Hallmark gene sets
+```{r include=TRUE, echo=FALSE, message=FALSE, warning = FALSE, fig.show="hold"}
+# load genesets in .gmt format
+gmtfile = fgsea::gmtPathways("./geneSets/h.all.v7.2.symbols.gmt")
+gseafunc(gmtfile=gmtfile, pval_cutoff=0.25,gene_sets="GSEA-Hallmarks")
+```
+
+* C2.Curated gene sets -KEGG
+```{r echo=FALSE, message=FALSE, warning = FALSE, fig.show="hold"}
+# load genesets in .gmt format
+gmtfile = fgsea::gmtPathways("./geneSets/c2.cp.kegg.v7.2.symbols.gmt")
+gseafunc(gmtfile=gmtfile, pval_cutoff=0.25, gene_sets="GSEA-C2_KEGG")
+```
+
+
+<!-- ## C7.Immunological signature gene sets (running slow) --> 
+<!-- ```{r fig.height=20, fig.show="hold", fig.width=12, message=FALSE, warning=FALSE} -->
+<!-- # load genesets in .gmt format -->
+<!-- gmtfile = fgsea::gmtPathways("./geneSets/c7.all.v7.2.symbols.gmt") -->
+<!-- gseafunc(gmtfile=gmtfile, pval_cutoff=0.25, gene_sets="GSEA-Immunological signature") -->
+<!-- ``` -->
+
+
+* Exhaustion gene set (Wherry lab)
+```{r message=FALSE, warning = FALSE, fig.height=2, fig.width=4, fig.show="hold"}
+# load genesets in .gmt format
+exhaustion_up = read.table("./geneSets/ESG_UP_ATAC.grp.txt",header=F)
+exhaustion_down = read.table("./geneSets/ESG_DN_ATAC.grp.txt",header=F)
+# gmtfile = list(ESG=c(as.vector(exhaustion_up[[1]]), as.vector(exhaustion_down[[1]])))
+gmtfile = list(ESG_UP=as.vector(exhaustion_up[[1]]), ESG_DN=as.vector(exhaustion_down[[1]]))
+
+  for (each in c("APDS_Tnn", "APDS_Tn", "CTLA4_Tnn", "CTLA4_Tn")){
+      # print comparison
+      comp <- sub("_"," CD8", each)
+      print(comp)
+      res = get(paste0("res_",each))
+      res <- res[order(res$stat,decreasing = T),]
+      res$symbol = rownames(res)
+      ranked_genes <- res %>% as.data.frame() %>% dplyr::select(symbol, stat) %>% deframe() 
+      ranked_genes <- na.omit(ranked_genes)
+      fgseaRes <- fgsea(pathways = gmtfile, 
+                        stats = ranked_genes,
+                        minSize=15,
+                        maxSize=600,
+                        eps = 0)
+     
+      print(fgseaRes)
+      
+      # output the table
+      fwrite(fgseaRes, file=paste0("./APDS_CTLA4/GSEA/enriched_genesets_Exhaustion_genesets","_",comp,".tsv"), sep="\t", sep2=c("",",",""))
+      
+      # enrichment plot
+      # pdf(paste0("./APDS_CTLA4/figures/GSEA_Exhaustion_genesets_", comp,".pdf"), 6, 4)
+      Up_title = paste0(comp,' (padj = ', formatC(fgseaRes[fgseaRes$pathway=="ESG_UP",]$pval, format="e", digits = 2),") ESG_UP")
+      print(plotEnrichment(gmtfile[["ESG_UP"]], ranked_genes) + labs(title=Up_title) + theme(plot.title = element_text(size=10)))
+      Down_title = paste0(comp,' (padj = ', formatC(fgseaRes[fgseaRes$pathway=="ESG_DN",]$pval, format="e", digits =2),") ESG_DN")
+      print(plotEnrichment(gmtfile[["ESG_DN"]], ranked_genes) + labs(title=Down_title) + theme(plot.title = element_text(size=10)))
+      
+      # dev.off()
+      
+}
+
+```

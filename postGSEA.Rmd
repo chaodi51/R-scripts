@@ -1,0 +1,65 @@
+---
+title: "Post GSEA analysis"
+author: "Chao Di, dic@email.chop.edu"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc_depth: 1
+    number_sections: yes
+  pdf_document:
+    toc_depth: '1'
+---
+
+```{r setup, include=FALSE, echo = FALSE, cache = FALSE}
+knitr::opts_chunk$set(dev = c('png', 'pdf'),message = FALSE)
+# replace with path where you want the results at
+knitr::opts_knit$set(root.dir="/Users/dic/Documents/Sarah Henrickson lab/20210920_Peyton_SHenrickson_RNAseq/")
+```
+
+
+```{r, include=FALSE,echo=FALSE,message = FALSE}
+# set home dir when test in console 
+setwd("/Users/dic/Documents/Sarah Henrickson lab/20210920_Peyton_SHenrickson_RNAseq/")
+library(dplyr)
+library(tidyr)
+library(data.table)
+
+```
+
+### Find core leading edge genes among the enriched gene sets {-}
+Sort out common leading edge genes among enriched terms (Hallmarks, c2-KEGG pathways, exhaustion gene sets(up and down)) 
+
+```{r, include=TRUE,echo=FALSE,message = FALSE}
+for (each in c("STAT3GOF_Tnn", "STAT3GOF_Tn", "STAT3LOF_Tnn", "STAT3LOF_Tn")){
+    comp <- sub("_"," CD8", each)
+    print(comp)
+    gsea_res_all <- data.frame(matrix(,ncol=8, nrow=0))
+    names(gsea_res_all) <- c('pathway','pval','padj','log2err','ES','NES','size','leadingEdge')
+    for(gene_sets in c('GSEA-Hallmarks', 'GSEA-C2_KEGG','Exhaustion_genesets')){
+        print(paste0(gene_sets, ": "))
+        gsea_res <- read.table(paste0("./STAT3/GSEA/enriched_genesets_", gene_sets,"_",comp,".tsv"), sep="\t", header=TRUE)
+        # print(head(gsea_res))
+        le_with_func <- gsea_res %>% 
+            rowwise() %>% mutate(le_gene=strsplit(leadingEdge,",")) %>% 
+            unnest(le_gene) %>% 
+            group_by(le_gene) %>% summarise(inPathways = list(pathway), nPathway=n()) %>%
+            mutate(inPathways = sapply(inPathways, toString)) %>% arrange(desc(nPathway))
+        # fwrite(le_with_func, file=paste0("./STAT3/GSEA/leadingEdge_genes_Enriched_genesets_", gene_sets,"_",comp,".tsv"), sep="\t")
+        print(le_with_func)
+        
+        # or combine all gene sets
+        gsea_res_all <- rbind(gsea_res_all, gsea_res)
+    }
+
+    le_with_func_all <- gsea_res_all %>% 
+          rowwise() %>% mutate(le_gene=strsplit(leadingEdge,",")) %>% 
+          unnest(le_gene) %>% 
+          group_by(le_gene) %>% summarise(inPathways = list(pathway), nPathway=n()) %>%
+          mutate(inPathways = sapply(inPathways, toString)) %>% arrange(desc(nPathway))
+    fwrite(le_with_func_all, file=paste0("./STAT3/GSEA/leadingEdge_genes_Enriched_genesets_",comp,".tsv"), sep="\t")
+    print(le_with_func_all)
+    
+}
+```
+
+

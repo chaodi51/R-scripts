@@ -1,0 +1,180 @@
+---
+title: "NSAID_gender_2019_16SrRNA qiime2_post_analysis"
+author: "Chao Di, dic@chop.edu"
+date: "7/23/2021"
+output: html_document
+params:
+  data: "male"
+  we.eBH: 0.05
+---
+
+```{r setup, include=FALSE, echo = FALSE, cache = FALSE}
+# replace with path where you want the results to be
+knitr::opts_knit$set(root.dir="~/Documents/Joseph Zackular lab/NSAID_gender_2019_16SrRNA/qiime2")
+```
+
+## Abstract {-}
+This script using `qiime2R` package to visualize Qiime2 artifacts (.qza files) and do post Qiime2 analysis, including ploting PCoA, drawing taxa heatmap and barplot, differential abundance analysis, ploting phylogenetic tree etc.
+
+```{r include=TRUE,echo=FALSE,message = FALSE, warning = FALSE}
+setwd("~/Documents/Joseph Zackular lab/NSAID_gender_2019_16SrRNA/qiime2")
+library(tidyverse)
+library(qiime2R)
+library(ggrepel) # for offset labels
+library(ggtree) # for visualizing phylogenetic trees
+library(ape) # for manipulating phylogenetic trees
+
+```
+
+### Load qiime2 artifacts and metadata {-}
+```{r include=TRUE,echo=FALSE,message = FALSE, warning = FALSE}
+proj = params$data
+# read feature table
+ASVs <- read_qza(paste0("asv/dada2/NSAID_gender_2019_16SrRNA_",proj,"-asv-table.qza"))
+cat("# Show first 5 samples and first 5 taxa:\n")
+ASVs$data[1:5,1:5]
+
+# read metadata
+metadata <- read_q2metadata(paste0(proj, "s_metadata.tsv"))
+cat("# Here is what metadata looks like:\n")
+head(metadata)
+
+# read taxonomy
+taxonomy <- read_qza(paste0("asv/taxonomy/NSAID_gender_2019_16SrRNA_", proj, "-taxonomy.qza"))
+taxonomy <- parse_taxonomy(taxonomy$data)
+cat("# Taxonomy assignment:\n")
+head(taxonomy)
+
+# create Phyloseq object
+# physeq<-qza_to_phyloseq(
+#     features=paste0("asv/dada2/NSAID_gender_2019_16SrRNA_", proj, "-asv-table.qza"),
+#     tree=paste0("asv/phylogeny/NSAID_gender_2019_16SrRNA_", proj, "-rooted_tree.qza"),
+#     taxonomy=paste0("asv/taxonomy/NSAID_gender_2019_16SrRNA_", proj, "-taxonomy.qza"),
+#     metadata = paste0(proj, "s_metadata.tsv")
+#     )
+# cat("# create a Phyloseq object, which includes the following stuffs: \n
+#     (OTU table is actually ASV table when you do ASV) \n")
+# physeq
+
+```
+
+### Post-Qiime2 analysis - Visualizations {-}
+* Alpha diversity between groups
+As we see in the below boxplot, drug treatment indeed increased alpha diverity, but the treatment duration seems does not have any effect.
+```{r, include=TRUE,echo=FALSE,message = FALSE}
+shannon <- read_qza(paste0("asv/diversity/core-metrics-results/NSAID_gender_2019_16SrRNA_", proj, "-shannon-vector.qza"))
+shannon <- shannon$data %>% rownames_to_column("SampleID")
+metadata <- metadata %>% left_join(shannon) %>% filter(study_day!="XX")
+head(metadata)
+
+#pdf("Shannon_by_days.pdf", 6,8)
+metadata %>% ggplot(aes(x=study_group, y=shannon, fill=study_group)) +
+  geom_boxplot() +
+  geom_jitter(width=0.1) +
+  facet_wrap(~study_day) +
+  xlab("Days") +
+  ylab("Shannon Diversity")
+#dev.off
+
+```
+
+* Plotting PCoA based on beta diversity matrices
+
+```{r include=TRUE,echo=FALSE,message = FALSE, warning = FALSE}
+uwunifrac <- read_qza(paste0("asv/diversity/core-metrics-results/NSAID_gender_2019_16SrRNA_", proj, "-unweighted-unifrac-pcoa-results.qza"))
+
+uwunifrac$data$Vectors %>%
+  select(SampleID, PC1, PC2) %>%
+  right_join(metadata) %>%
+  ggplot(aes(x=PC1, y=PC2, color=study_group, shape=study_day, size=shannon)) +
+  geom_point(alpha=0.5) + #alpha controls transparency and helps when points are overlapping
+  theme_q2r() +
+  scale_shape_manual(values=c(16,1), name="Duration") + #see http://www.sthda.com/sthda/RDoc/figure/graphs/r-plot-pch-symbols-points-in-r.png for numeric shape codes
+  scale_size_continuous(name="Shannon Diversity") +
+  scale_color_discrete(name="Treatments")
+```
+
+* Plotting a Heatmap for taxonomy
+From the heatmap, the overall pattern seems similar between groups of treatments or days.
+```{r echo=FALSE, fig.height=5, fig.width=14, message=FALSE, warning=FALSE, include=TRUE}
+metadata <- metadata %>% filter(study_group!="XX") %>% filter(study_day!="XX")
+taxasums<-summarize_taxa(ASVs$data, taxonomy)$Genus
+# filter out useless samples
+taxasums <- taxasums %>% select(starts_with("D0") | starts_with("D21"))
+taxa_heatmap(taxasums, metadata, "study_group")
+taxa_heatmap(taxasums, metadata, "study_day")
+```
+
+* Making a taxonomic barplot
+
+```{r include=TRUE,echo=FALSE,message = FALSE, warning = FALSE, fig.width=14, fig.height=5}
+taxa_barplot(taxasums, metadata, "study_group")
+taxa_barplot(taxasums, metadata, "study_day")
+```
+
+* Differential Abundance Analysis (Aldex2 method) - Volcano plot
+Expected Benjamini-Hochberg corrected P value of Welch’s t test was performed, p value<0.05 were shown as red dots
+```{r include=TRUE,echo=FALSE,message = FALSE, warning = FALSE, fig.width=8, fig.height=8}
+ASVs <- read_qza(paste0("asv/dada2/NSAID_gender_2019_16SrRNA_",proj,"-asv-table.qza"))$data
+diff_Celecoxib <- read_qza(paste0("asv/aldex2/Celecoxib_test/NSAID_gender_2019_16SrRNA_", proj, "-differentials.qza"))$data
+diff_Naproxen <- read_qza(paste0("asv/aldex2/Naproxen_test/NSAID_gender_2019_16SrRNA_", proj, "-differentials.qza"))$data
+taxonomy <- read_qza(paste0("asv/taxonomy/NSAID_gender_2019_16SrRNA_", proj, "-taxonomy.qza"))$data
+tree <- read_qza(paste0("asv/phylogeny/NSAID_gender_2019_16SrRNA_", proj, "-rooted_tree.qza"))$data
+
+diff_num1 <- dim(diff_Celecoxib[which(diff_Celecoxib$we.eBH < params$we.eBH),])[1]
+cat(paste0("Celecoxib vs Control, number of significantly changed taxa: ", diff_num1, "\n"))
+diff_Celecoxib_tab <- diff_Celecoxib %>% left_join(taxonomy) %>% filter(we.eBH < params$we.eBH) %>% select(diff.btw, we.eBH, Taxon)
+colnames(diff_Celecoxib_tab) = c("log2FC","q-value","Taxon")
+diff_Celecoxib_tab 
+
+
+diff_Celecoxib %>%
+  left_join(taxonomy) %>%
+  mutate(Significant=if_else(we.eBH < params$we.eBH,TRUE, FALSE)) %>%
+  mutate(Taxon=as.character(Taxon)) %>%
+  mutate(TaxonToPrint=if_else(we.eBH < params$we.eBH, Taxon, "")) %>% #only provide a label to significant results
+  ggplot(aes(x=diff.btw, y=-log10(we.eBH), color=Significant, label=TaxonToPrint)) +
+  geom_text_repel(size=1.5, nudge_y=0.1) +
+  geom_point(alpha=0.6, shape=16) +
+  theme_q2r() +
+  xlab("log2(fold change)") +
+  ylab("-log10(P-value)") +
+  theme(legend.position="none") +
+  scale_color_manual(values=c("black","red"))
+
+diff_num2 <- dim(diff_Naproxen[which(diff_Naproxen$we.eBH < params$we.eBH),])[1]
+cat(paste0("Naproxen vs Control, number of significantly changed taxa: ", diff_num2, "\n"))
+diff_Naproxen_tab <- diff_Naproxen %>% left_join(taxonomy) %>% filter(we.eBH < params$we.eBH) %>% select(diff.btw, we.eBH, Taxon)
+colnames(diff_Naproxen_tab) = c("log2FC","q-value","Taxon")
+diff_Naproxen_tab 
+
+diff_Naproxen %>%
+  left_join(taxonomy) %>%
+  mutate(Significant=if_else(we.eBH < params$we.eBH,TRUE, FALSE)) %>%
+  mutate(Taxon=as.character(Taxon)) %>%
+  mutate(TaxonToPrint=if_else(we.eBH < params$we.eBH, Taxon, "")) %>% #only provide a label to significant results
+  ggplot(aes(x=diff.btw, y=-log10(we.eBH), color=Significant, label=TaxonToPrint)) +
+  geom_text_repel(size=1.5, nudge_y=0.1) +
+  geom_point(alpha=0.6, shape=16) +
+  theme_q2r() +
+  xlab("log2(fold change)") +
+  ylab("-log10(P-value)") +
+  theme(legend.position="none") +
+  scale_color_manual(values=c("black","red"))
+```
+
+
+* Plotting a Phylogenetic Tree (* denotes significantly changed by Celecoxib)
+
+```{r include=TRUE,echo=FALSE,message = FALSE, warning = FALSE, fig.width=12, fig.height=12}
+results <- diff_Celecoxib %>% mutate(Significant=if_else(we.eBH<params$we.eBH,"*", ""))
+
+tree<-drop.tip(tree, tree$tip.label[!tree$tip.label %in% results$Feature.ID]) # remove all the features from the tree we do not have data for
+ggtree(tree, layout="circular") %<+% results +
+  geom_tippoint(aes(fill=diff.btw), shape=21, color="grey50")  +
+  geom_tiplab2(aes(label=Significant), size=8) +
+  scale_fill_gradient2(low="darkblue",high="darkred", midpoint = 0, mid="white", name="log2(fold-change") +
+  theme(legend.position="right")
+
+```
+

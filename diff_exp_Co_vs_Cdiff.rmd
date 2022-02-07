@@ -1,0 +1,228 @@
+---
+title: "Differential expression analysis for Coculture vs Cdiff"
+author: "Chao Di, dic@email.chop.edu"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc_depth: 1
+    number_sections: yes
+  pdf_document:
+    toc_depth: '1'
+---
+# Abstract 
+(Please modify) This project is for dissecting the molecular interactions between Cdiff and Efaecalis, by comparing the transcriptome and metabolome betwwen the co-culture of the two pathogens and the single pathogen.  The methods used here for differential gene expression analysis is DESeq2.
+
+```{r setup, include=FALSE, echo = FALSE, cache = FALSE}
+knitr::opts_chunk$set(dev = c('png', 'pdf'),message = FALSE)
+# replace with path where you want the results be
+knitr::opts_knit$set(root.dir="/Users/dic/Documents/Joseph Zackular lab/RNA-seq Cdiff_Efaecalis_coculture/diff_exp/Colculture_vs_Cdiff_cd196")
+```
+
+```{r, include=FALSE,echo=FALSE,message = FALSE}
+library(DESeq2)
+library(pheatmap)
+library(genefilter)
+library(ggplot2)
+library(RColorBrewer)
+library(EnhancedVolcano)
+```
+
+# Overview of the data by several plots
+## Load read counts and do data transformation
+Supply with raw read counts table "all_readCount.tsv" calculated from STAR/HT-seq, and sample info "sample_contrast.tsv", do value transformation and normalization (variance stabilizing transformations (VST)) in DESeq2. 
+
+```{r, include=TRUE,echo=FALSE,message = FALSE, warning=FALSE}
+# colData and countData must have the same sample order, but this is ensured
+# by the way we create the count matrix
+cts <- read.table("all_readCount.tsv", header=TRUE, row.names="gene", check.names=FALSE)
+# coldata <- read.table("sample_contrast.tsv", header=TRUE, row.names="sample", check.names=FALSE)
+coldata <- read.table("sample_contrast.tsv",header=TRUE, check.names=FALSE)
+rownames(coldata)=coldata$sample
+
+cat("Contrast table:\n")
+coldata
+
+dds <- DESeqDataSetFromMatrix(countData=cts, colData=coldata, design = ~ condition)
+dds$condition <- relevel(dds$condition, "Cdiff") # use "Cdiff" as the reference
+
+# remove uninformative columns
+dds <- dds[rowSums(counts(dds)) > 1, ]
+# normalization and pre-processing
+dds <- DESeq(dds)
+
+# raw count normalization
+norm_counts <- counts(dds, normalized=TRUE) 
+# count transformation, log2 scale, either rlog or vst
+vsd <- vst(dds, blind=FALSE)
+cat("The data values after transformation:\n")
+head(assay(vsd))
+```
+
+## PCA plot
+The PCA plot shows the samples in the 2D plane spanned by their first two principal components. This type of plot is useful for visualizing the overall effect of experimental covariates and batch effects.
+
+```{r, include=TRUE,echo=FALSE,message = FALSE}
+## visualizations ##
+# pca plot
+# pdf("pca-plot.pdf")
+pcaData <- plotPCA(vsd, intgroup=c("condition"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=condition)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed()
+# dev.off()
+```
+
+## Heatmap for expression matrix
+Heatmap showing the expressions of the most variable genes (top 35 here), optional to do clustering between samples. This gives us the information of which samples and which genes are close to each other.
+
+```{r, include=TRUE,fig.height=8, fig.width=7,echo=FALSE,message = FALSE}
+# heatmap of the count matrix
+select <- head(order(-rowVars(assay(vsd))),35) # most variable genes
+pdata <- assay(vsd)[select,]
+df <- as.data.frame(colData(dds)[,c("condition")])
+rownames(df) <- rownames(colData(dds))
+colnames(df) <- c("condition")
+# pdf("heatmap_expression_matrix.pdf")
+pheatmap(pdata, cluster_rows=TRUE, show_rownames=TRUE,
+         cluster_cols=TRUE, annotation_col=df)
+# dev.off()
+```
+
+## heatmap of sample-sample distance
+Apply the `dist` function to the transpose of the transformed count matrix to get sample-to-sample distances. A heatmap of distance matrix gives us an overview over similarities and dissimilarities between samples. Provide a hierarchical clustering hc to the heatmap function based on the sample distances, or else the heatmap function would calculate a clustering based on the distances between the rows/columns of the distance matrix.
+
+```{r, include=TRUE,echo=FALSE,message = FALSE}
+# heatmap of sample-sample distances
+# pdf("heatmap_sample_distance.pdf")
+sampleDists = dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- vsd$condition
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+# dev.off()
+```
+
+# Differential expression analysis by `DESeq2`
+Calculation of expression values (log2 scale), transformed by variance stabilizing transformations (VST). Setup contrast as Colculture vs Cdiff/Efaecalis, export tables with the standard DESeq2 result format: "baseMean log2FoldChange lfcSE stat pvalue padj", optional to do the "Log fold change shrinkage"
+
+## Export expression table and report the diff numbers
+Use padj<=0.01 & log2FoldChange>=1 as the cutoff
+
+```{r, include=TRUE,echo=FALSE,message = FALSE, warning = FALSE}
+# coldata <- read.table("sample_contrast.tsv",header=TRUE, check.names=FALSE)
+# rownames(coldata)=coldata$sample
+coldata <- coldata[grep("Efaecalis",rownames(coldata), invert=T),]
+cts <- cts[,grep("Efaecalis",colnames(cts),invert=T)]
+
+dds <- DESeqDataSetFromMatrix(countData=cts, colData=coldata, design = ~ condition)
+dds$condition <- relevel(dds$condition, "Cdiff") # use "Cdiff" as the reference
+
+# remove uninformative columns
+dds <- dds[rowSums(counts(dds)) > 10, ]
+# normalization and pre-processing
+dds <- DESeq(dds)
+
+# raw count normalization
+norm_counts <- counts(dds, normalized=TRUE) 
+# count transformation, log2 scale, either rlog or vst
+vsd <- vst(dds, blind=FALSE)
+
+# get the current contrast/coculture_vs_mono from snakemake output, e.g., "Coculture_vs_Cdiff"
+# output_file <- snakemake@output[["table"]]
+output_file <- "Coculture_vs_Cdiff.diffexp.tsv"
+comp = gsub(".diffexp.tsv", "", tail(unlist(strsplit(output_file, "/")),1))
+
+res <- results(dds, contrast = c("condition", unlist(strsplit(comp, "_vs_"))[1], unlist(strsplit(comp, "_vs_"))[2]))
+# shrink fold changes for lowly expressed genes
+res <- lfcShrink(dds, contrast = c("condition", unlist(strsplit(comp, "_vs_"))[1], unlist(strsplit(comp, "_vs_"))[2]), res=res, type="ashr")
+
+# report # up/down genes
+up_gene = res[which(res$padj<=1e-2 & res$log2FoldChange>=1),]
+down_gene = res[which(res$padj<=1e-2 & res$log2FoldChange <= -1),]
+cat(paste0("padj<=0.01 & log2FoldChange>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+# extract the current cell_type samples
+df_vsd = as.data.frame(assay(vsd))
+# merge with normalized count data and output the table
+resdata <- merge(df_vsd, as.data.frame(res), by="row.names",sort=FALSE)
+names(resdata)[1] <- "Gene"
+
+# write.table(resdata, file=snakemake@output[["table"]], sep="\t", quote=FALSE, row.names=FALSE)
+write.table(resdata, file="Coculture_vs_Cdiff.diffexp.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+```
+
+## MA-plots to show the distribution of data points.
+```{r, include=TRUE,echo=FALSE,message = FALSE}
+## basic plots for Data quality assessment
+# M-A plot, points are red with padj < 0.1, points fall out of the window are open triangles 
+# pdf(snakemake@output[["ma_plot"]])
+# pdf("ma_plot.pdf")
+plotMA(res, main=comp, colLine="red")
+# dev.off()
+```
+
+##  Vocano-plot to mark the diffrentially expression genes with customized cutoffs.
+
+```{r, include=TRUE,fig.height=8, fig.width=7,echo=FALSE,message = FALSE, warning = FALSE}
+# volcano plot using EnhancedValcano
+genelist <- read.table("Cdiff_cd196_geneid_genename.txt",header=F,row.names = 1)
+colnames(genelist)="gene_name"
+resdata2=merge(genelist, as.data.frame(res), by="row.names",sort=FALSE)
+rownames(resdata2)=resdata2$Row.names
+
+# only color code Alex selected 'amino acid metabolism' genes (43 with gene symbols)
+aamlist = read.table("Alex_DEGs_AAmetabolism_colored.txt", header=F)
+DEGs = c(rownames(up_gene), rownames(down_gene)) # 330 genes
+DEG_names = resdata2[which(rownames(resdata2) %in% DEGs),]$gene_name ## 3 ids have duplicate names
+aamlist_DEGs = aamlist[,1][aamlist[,1] %in% DEGs] # aam genes also in DEGs
+aamlist_DEG_names = resdata2[which(resdata2$Row.names %in% aamlist_DEGs),]$gene_name # use gene_name(should be unique)
+aamlist_DEG_names_only = aamlist_DEG_names[grep("CD196", aamlist_DEG_names, invert=T)] # filter out genes with traditional gene symbol
+
+# use named vector to customize colors
+# keyvals <- ifelse(
+#     resdata2$gene_name %in% aamlist_DEG_names, 'red', 
+#         ifelse(resdata2$gene_name %in% DEG_names, 'blue', 
+#             'black'))
+# names(keyvals)[keyvals == 'red'] <- 'AA metabolism'
+# names(keyvals)[keyvals == 'blue'] <- 'non AAM'
+# names(keyvals)[keyvals == 'black'] <- 'non DE'
+
+# only label AAM and non AAM
+keyvals <- ifelse(
+     resdata2$gene_name %in% aamlist_DEG_names, 'red', 'black')
+names(keyvals)[keyvals == 'red'] <- 'AA metabolism'
+names(keyvals)[keyvals == 'black'] <- 'non AAM'
+
+# pdf(snakemake@output[["volcano_plot"]])
+# pdf("volcano-plot.pdf",12,12)
+p <- EnhancedVolcano(resdata2,
+                lab = resdata2$gene_name,
+                # label all AAM
+                #selectLab = resdata2$gene_name[which(names(keyvals) %in% c('AA metabolism'))],
+                # only label genes with names (not number ids)
+                selectLab = aamlist_DEG_names_only,
+                labSize = 5,
+                #lab = NA,
+                colCustom = keyvals,
+                x = 'log2FoldChange',
+                y = 'padj',
+                title=expression(paste("Coculture vs. C. ", italic("difficile"), " alone")),
+                subtitle = "",
+                pCutoff = 1e-2,
+                FCcutoff = 1,
+                pointSize = 3,
+                drawConnectors = TRUE,
+                widthConnectors = 0.5,
+                typeConnectors = 'open',
+                colConnectors = 'grey'
+                ) + theme(plot.title = element_text(hjust = 0.5)) 
+print(p)
+# dev.off()
+```

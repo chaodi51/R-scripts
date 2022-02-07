@@ -1,0 +1,113 @@
+---
+title: "J2seq analysis, peak calling for Ad5"
+author: "Chao Di, dic@chop.edu"
+date: "6/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo = FALSE, cache = FALSE}
+# replace with path where you want the results to be
+knitr::opts_knit$set(root.dir="/Users/dic/Documents/Weitzman lab/J2seq")
+```
+
+## Abstract {-}
+This is the analysis of J2seq data, aim to uncover the role of dsRNA produced by Ad5 or Ad5 mutant(E4) in human cells.
+Human cell line (A549) was infected with Adenovirus, either wildtype serotype number 5 Adenovirus (Ad5) or a mutant of Ad5 that is lacking a region of viral proteins in the E4 region (Delta-E4, often just shortened to E4). Post infection the virus has "taken over" the infected cell so completely that more than half of all mRNA is viral. Trying to do peak calling for J2-IP regions on Ad5, no existing softwares designed for a small compact genome like Ad5. Using edgeR to call the enriched sliding-windows as peaks here.
+
+```{r include=TRUE,echo=FALSE, message = FALSE, warning = FALSE}
+setwd("/Users/dic/Documents/Weitzman lab/J2seq")
+library(dplyr)
+library(ggplot2)
+library(edgeR)
+#library(HelloRanges)
+library(bedr)
+```
+
+
+```{r, include=TRUE,echo=FALSE,message = FALSE, warning=FALSE}
+
+ad5_bin <- read.table("Ad5_bins.bed",header=FALSE)
+colnames(ad5_bin) <- c("chr","start","end","name","score","strand")
+
+x <- read.delim("J2seq_featureCount_ad5_bins.tsv",row.names=1)
+colnames(x) <- colnames(x) %>% gsub(".merged.dedup.sorted.bam", "", .) %>% gsub("\\.", "_", .)
+
+# colData and countData must have the same sample order, but this is ensured by the way we create the count matrix
+coldata <- read.table("sample_contrast.tsv",header=TRUE, check.names=FALSE)
+coldata$sample <- coldata$sample %>% gsub("-", "_", .)
+coldata$lib_type <- coldata$lib_type %>% gsub("-","_", .)
+coldata
+
+mapped_reads <- read.table("mapped_reads.txt",header=TRUE)
+group <- factor(paste0(coldata$phenotype, ".", coldata$lib_type)) ## the same coldata used above
+y <- DGEList(counts=x, group=group, lib.size = mapped_reads$deduplicated)
+
+# filter low count genes
+keep <- filterByExpr(y)
+y <- y[keep,,keep.lib.sizes=TRUE]
+y <- calcNormFactors(y, lib.size = mapped_reads$deduplicated)
+cat("Multidimensional scaling plot of distances between gene expression profiles (PCA analysis):\n")
+plotMDS(y)
+#plotMD(cpm(y, log=TRUE), column=5)
+
+# experiment design
+design <- model.matrix(~0+group, data=y$samples)
+colnames(design) <- levels(group)
+rownames(ad5_bin) = ad5_bin$name
+
+# fit the GLM model
+y <- estimateDisp(y, design, robust=TRUE)
+cat("Common dispersion among samples:\n")
+y$common.dispersion
+cat("Square root of the common dispersion gives the coefficient of variation of biological variation:\n")
+sqrt(y$common.dispersion)
+cat("Plot biological coefficient of variation (BCV) with log(CPM):\n")
+plotBCV(y)
+
+fit <- glmQLFit(y, design, robust=TRUE)
+plotQLDisp(fit)
+
+## J2 enriched peaks in wt
+# qlf_1 <- glmQLFTest(fit,contrast=c(0,0,-1,1))
+qlf_1 <- glmTreat(fit,contrast=c(0,0,-1,1), lfc=1)
+all.res_1 <- topTags(qlf_1, n=Inf)
+up.res_1 <- all.res_1[all.res_1$table$logFC > 1 & all.res_1$table$PValue < 0.05,]
+cat("# J2 enriched peaks in wt, resulting number of bins: \n")
+dim(up.res_1)[1]
+wt_enriched_bins = merge(ad5_bin, up.res_1$table, by="row.names")[,-1] %>% arrange(start)
+#write.table(wt_enriched_bins, file="test.txt", sep="\t", quote=F, col.names=F, row.names=F)
+
+wt_peaks <- bedr(engine = "bedtools", 
+        input = list(i = wt_enriched_bins), 
+        check.chr = FALSE,
+        method = "merge", 
+        params = "-s -c 6,7 -o distinct,mean")
+colnames(wt_peaks) = c("chr","peak_start","peak_end","strand","log2FC(J2/input)")
+write.table(wt_peaks, file="wt_peaks.tsv", sep="\t", quote=F, col.names=T, row.names=F)    
+
+## J2 enriched peaks in e4
+#qlf_2 <- glmQLFTest(fit,contrast=c(-1,1,0,0))
+qlf_2 <- glmTreat(fit,contrast=c(-1,1,0,0), lfc=1)
+all.res_2 <- topTags(qlf_2, n=Inf)
+up.res_2 <- all.res_2[all.res_2$table$logFC > 1 & all.res_2$table$PValue < 0.05,]
+cat("# J2 enriched peaks in e4, resulting number of bins: \n")
+dim(up.res_2)[1]
+#call peaks
+e4_enriched_bins = merge(ad5_bin, up.res_2$table, by="row.names")[,-1] %>% arrange(start)
+#write.table(e4_enriched_bins, file="test.txt", sep="\t", quote=F, col.names=F, row.names=F)
+
+e4_peaks <- bedr(engine = "bedtools", 
+        input = list(i = e4_enriched_bins), 
+        check.chr = FALSE,
+        method = "merge", 
+        params = "-s -c 6,7 -o distinct,mean")
+colnames(e4_peaks) = c("chr","peak_start","peak_end","strand","log2FC(J2/input)")
+write.table(e4_peaks, file="e4_peaks.tsv", sep="\t", quote=F, col.names=T, row.names=F)    
+
+# pull out the expression values
+#lgcpm <- as.data.frame(cpm(y, log=TRUE))
+
+
+```
+
+
