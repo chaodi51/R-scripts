@@ -1,0 +1,474 @@
+---
+title: "scRNA-seq PTCRA"
+author: "Chao Di, dic@chop.edu"
+output: 
+  html_document:
+    number_sections: false
+    code_folding: show
+---
+
+```{r, setup, include = FALSE}
+# replace with path where you want the results to be
+knitr::opts_knit$set(root.dir="/mnt/isilon/henrickson_lab/users/chaodi/scRNA-seq_PTCRA")
+knitr::opts_chunk$set(message = FALSE, 
+                      warning = FALSE, 
+                      tidy = TRUE,
+                      fig.width = 10, 
+                      tidy.opts = list(width.cutoff = 95),
+                      root.dir="/mnt/isilon/henrickson_lab/users/chaodi/scRNA-seq_PTCRA")
+```
+
+## Abstract  
+PTCRA patients in groups – PTCRA A, PTCRA B, PTCRA C and PTCRA D. The way of grouping patients may bring batch effect, which is difficult to tell. Need to find differentials within three patient/case - control groups.  
+
+```{r, include=FALSE}
+# library(scRNAseq)
+library(scater)
+library(SingleR)
+library(celldex)
+library(Seurat)
+library(RColorBrewer)
+library(sctransform)
+library(glmGamPoi)
+library(patchwork)
+# library(EnhancedVolcano)
+library(tidyverse)
+```
+
+## Load Seurat object including all samples from Sam  
+```{r}
+# load Seurat obj
+all.ptcra <- readRDS("ptcra_all_samples.rds") # original obj
+Idents(all.ptcra) <- "sample"
+# read metadata
+sample_info <- read.csv("sample_info.txt", sep="\t")
+sample_info
+```
+
+### The case-control assignment in the object was wrong  
+```{r}
+cat("case1 samples:\n")
+set1<-subset(x=all.ptcra, subset = case_control %in% c("case1","control1"))
+unique(set1@meta.data$sample)
+cat("case2 samples:\n")
+set2<-subset(x=all.ptcra, subset = case_control %in% c("case2","control2"))
+unique(set2@meta.data$sample)
+cat("case3 samples:\n")
+set3<-subset(x=all.ptcra, subset = case_control %in% c("case3","control3"))
+unique(set3@meta.data$sample)
+```
+
+### Add metadata info  
+last four columns: case_control, Condition, Age_group, Library, 'case_control' assignment will be replaced in the object  
+
+```{r, eval = FALSE}
+metadata_update <- left_join(all.ptcra@meta.data, sample_info %>% select(c("PID", "case_control", "Condition", "Age_group", "Library")), by = c("sample" = "PID"))
+rownames(metadata_update) <- rownames(all.ptcra@meta.data)
+
+all.ptcra <- AddMetaData(object = all.ptcra, metadata = metadata_update %>% select(c("case_control.y", "Condition", "Age_group", "Library")), col.name=c("case_control", "Condition", "Age_group", "Library"))
+```
+
+## Overiew of the data - Basic quality control and filtering  
+Meta.data is the most important field for next steps. It can be acessed using both @ and [[]] operators. Right now it has 3 fields per celL: dataset ID, number of UMI reads detected per cell (nCount_RNA), and the number of expressed (detected) genes per same cell (nFeature_RNA).  
+  
+### metadata information  
+
+```{r}
+all.ptcra
+# # case_control
+# unique(all.ptcra@meta.data$case_control)
+# # dataset
+# unique(all.ptcra@meta.data$dataset)
+# # sample
+# unique(all.ptcra@meta.data$sample)
+# # Library
+# unique(all.ptcra@meta.data$Library)
+# # Condition
+# unique(all.ptcra@meta.data$Condition)
+# # Age_group
+# unique(all.ptcra@meta.data$Age_group)
+# metadata
+meta <- all.ptcra@meta.data
+dim(meta)
+summary(meta$nCount_RNA)
+summary(meta$nFeature_RNA)
+```
+
+### Add percentage of counts for mitochondrial genes and add cell cycle scores   
+
+```{r, eval = FALSE}
+all.ptcra[["percent.mt"]] <- PercentageFeatureSet(all.ptcra, pattern = "^MT-")
+
+s.genes <- cc.genes.updated.2019$s.genes
+g2m.genes <- cc.genes.updated.2019$g2m.genes
+
+all.ptcra <- CellCycleScoring(all.ptcra , s.features = s.genes, g2m.features = g2m.genes)
+table(all.ptcra [[]]$Phase)
+```
+
+### Visualize QC metrics as a violin plot   
+```{r, fig.width=10, fig.height=19}
+VlnPlot(all.ptcra, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 1)
+```
+
+### Visualize feature-feature relationships 
+```{r, fig.width=10, fig.height=8}
+plot1 <- FeatureScatter(all.ptcra, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(all.ptcra, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+### Filter cells 
+Filter cells that have unique feature counts over 2,500 (doublets or multiplets) or less than 200 and cells that have >5% mitochondrial counts  
+
+```{r}
+all.ptcra <- subset(all.ptcra, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+all.ptcra
+```
+
+## Data Integration  
+
+### Load object `all.ptcra.list`
+Load `all.ptcra.list` instead of running the following chunks (set eval=FALSE) again when knitting.  
+```{r}
+all.ptcra.list <- readRDS("all.ptcra.list.rds")
+```
+
+### Split object and SCTransform normalization
+Split object to gorups of patients and controls, normalize and identify variable features for each dataset independently  
+
+```{r, eval = FALSE}
+all.ptcra.list <- SplitObject(all.ptcra, split.by = "case_control")
+
+for (i in 1:length(all.ptcra.list)) {
+    all.ptcra.list[[i]] <- SCTransform(all.ptcra.list[[i]], method = "glmGamPoi", vars.to.regress = c("percent.mt","S.Score","G2M.Score"), verbose = FALSE)
+}
+```
+
+### Select features and prepare integration 
+Select features that are repeatedly variable across datasets for integration, and run `PrepSCTIntegration`, which ensures that all necessary Pearson residuals have been calculated.  
+
+```{r, eval = FALSE}
+all.ptcra.features <- SelectIntegrationFeatures(object.list = all.ptcra.list, nfeatures = 3000)
+
+all.ptcra.list <- PrepSCTIntegration(object.list = all.ptcra.list, anchor.features = all.ptcra.features)
+```
+
+### Run PCA on each object 
+Run PCA on each object in the list, which is required for running the reciprocal PCA in `FindIntegrationAnchors`  
+
+```{r, eval = FALSE}
+for (i in 1:length(all.ptcra.list)) {
+    all.ptcra.list[[i]] <- RunPCA(all.ptcra.list[[i]], features = all.ptcra.features)
+}
+```
+### Save object `all.ptcra.list`
+Save `all.ptcra.list` before extract specific datasets.  
+```{r, eval = FALSE}
+saveRDS(all.ptcra.list, file="all.ptcra.list.rds")
+```
+
+### Load objects `ptcra.integrated1`, `ptcra.integrated2`, and `ptcra.integrated3`
+Load integrated objects instead of running the following chunks (set eval=FALSE) again when knitting.  
+```{r}
+ptcra.integrated1 <- readRDS("ptcra.integrated1.rds")
+ptcra.integrated2 <- readRDS("ptcra.integrated2.rds")
+ptcra.integrated3 <- readRDS("ptcra.integrated3.rds")
+```
+
+### Identify anchors and integrate the datasets
+Make sure to set normalization.method = 'SCT, and reduction="rpca" for reciprocal PCA 
+```{r, eval = FALSE}
+## Integrate all objects together, run all combinations of the objects. Time consuming.
+# all.ptcra.anchors <- FindIntegrationAnchors(object.list = all.ptcra.list, normalization.method = "SCT", anchor.features = all.ptcra.features, reduction = "rpca")
+# all.ptcra.integrated <- IntegrateData(anchorset = all.ptcra.anchors, normalization.method = "SCT")
+
+ptcra.list1 <- c(all.ptcra.list$control1, all.ptcra.list$case1)
+names(ptcra.list1) <- c("control1", "case1")
+ptcra.anchors1 <- FindIntegrationAnchors(object.list = ptcra.list1, normalization.method = "SCT", anchor.features = all.ptcra.features, reduction = "rpca")
+ptcra.integrated1 <- IntegrateData(anchorset = ptcra.anchors1, normalization.method = "SCT")
+
+ptcra.list2 <- c(all.ptcra.list$control2, all.ptcra.list$case2)
+names(ptcra.list2) <- c("control2", "case2")
+ptcra.anchors2 <- FindIntegrationAnchors(object.list = ptcra.list2, normalization.method = "SCT", anchor.features = all.ptcra.features, reduction = "rpca")
+ptcra.integrated2 <- IntegrateData(anchorset = ptcra.anchors2, normalization.method = "SCT")
+
+ptcra.list3 <- c(all.ptcra.list$control3, all.ptcra.list$case3)
+names(ptcra.list3) <- c("control3", "case3")
+ptcra.anchors3 <- FindIntegrationAnchors(object.list = ptcra.list3, normalization.method = "SCT", anchor.features = all.ptcra.features, reduction = "rpca")
+ptcra.integrated3 <- IntegrateData(anchorset = ptcra.anchors3, normalization.method = "SCT")
+
+```
+
+## Proceed with downstream analysis on the integrated dataset {.tabset}
+<!-- #### All integrated   -->
+
+<!-- # ```{r} -->
+<!-- # # DefaultAssay(all.ptcra.integrated) <- "integrated" -->
+<!-- # # all.ptcra.integrated <- RunPCA(all.ptcra.integrated) -->
+<!-- # # all.ptcra.integrated <- RunUMAP(all.ptcra.integrated, reduction = "rpca", dims = 1:30) -->
+<!-- # # plots <- DimPlot(all.ptcra.integrated, group.by = c("case_control")) -->
+<!-- # # plots + theme(legend.position = "top") + guides(color = guide_legend(nrow = 3, byrow = TRUE, -->
+<!-- # #     override.aes = list(size = 3))) -->
+<!-- # ``` -->
+
+### control1 and case1 integrated  
+#### PCA and Clustering  
+```{r, eval = FALSE}
+ptcra.integrated1 <- RunPCA(ptcra.integrated1)
+ptcra.integrated1 <- RunUMAP(ptcra.integrated1, reduction = "pca", dims = 1:30)
+ptcra.integrated1 <- FindNeighbors(ptcra.integrated1, reduction = "pca", dims = 1:30)
+ptcra.integrated1 <- FindClusters(ptcra.integrated1, resolution = 0.5)
+```
+
+#### Visualization  
+```{r, fig.height=9, fig.width=16}
+DefaultAssay(ptcra.integrated1) <- "integrated"
+
+p1 <- DimPlot(ptcra.integrated1, reduction = "umap", group.by = "case_control") + theme(legend.position = "top")
+p2 <- DimPlot(ptcra.integrated1, reduction = "umap", label = TRUE, repel = TRUE) + theme(legend.position = "top")
+p1 + p2
+DimPlot(ptcra.integrated1, reduction = "umap", split.by = "case_control") + theme(legend.position = "top")
+```
+
+#### Cell type annotation using SingleR
+Get reference datasets from `celldex` package. Note that there are two cell type assignments, `label.main` and `label.fine`. Convert our Seurat object to single cell experiment (SCE).   
+```{r, eval = FALSE}
+# use MonacoImmuneData as reference, can also use HumanPrimaryCellAtlasData or DatabaseImmuneCellExpressionData
+monaco.ref <- celldex::MonacoImmuneData()
+
+DefaultAssay(ptcra.integrated1) <- "RNA"
+ptcra_sce1 <- as.SingleCellExperiment(DietSeurat(ptcra.integrated1))
+ptcra_sce1
+```
+Run `SingleR`  
+
+```{r, eval = FALSE}
+ptcra_sce1.monaco.main <- SingleR(test = ptcra_sce1, assay.type.test = 1, ref = monaco.ref, labels = monaco.ref$label.main)
+ptcra_sce1.monaco.fine <- SingleR(test = ptcra_sce1, assay.type.test = 1, ref = monaco.ref, labels = monaco.ref$label.fine)
+```
+
+Add the annotations to the Seurat object metadata (or replace previous labels).    
+```{r, eval = FALSE}
+ptcra.integrated1@meta.data$SingleR.labels_Monaco <- ptcra_sce1.monaco.fine$pruned.labels
+```
+
+Visualize the fine-grained annotations.  
+```{r, fig.height=9, fig.width=10}
+# Summary of general cell type annotations. 
+# table(ptcra_sce1.monaco.main$pruned.labels)
+# table(ptcra_sce1.monaco.fine$pruned.labels)
+ptcra.integrated1 <- SetIdent(ptcra.integrated1, value = "SingleR.labels_Monaco")
+DimPlot(ptcra.integrated1, label = TRUE , repel = TRUE, label.size = 3) + theme(legend.position = "top")
+```
+
+Plot some markers.  
+```{r}
+FeaturePlot(ptcra.integrated1,c("CCR7", "SELL","PTPRC", "IL7R","IL2RG","CD27", "CD79A", "FCGR3A", "PPBP")) 
+```
+
+Save object `ptcra.integrated1`.    
+```{r, eval= FALSE}
+saveRDS(ptcra.integrated1, file="ptcra.integrated1.rds")
+```
+
+#### Identify differential expressed genes between patients vs controls for specific cell types 
+We’ve aligned the patient and control cells. We choose **Naive CD8 T cells** populations for differential expression analysis between patients and controls.
+We create a column in the meta.data slot to hold both the cell type and case_control information and switch the current ident to that column. Then we use `FindMarkers()` to find the genes that are different between patient and control "Naive CD8 T cells". 
+```{r}
+library(ggplot2)
+library(cowplot)
+theme_set(theme_cowplot())
+
+ptcra.integrated1$celltype <- Idents(ptcra.integrated1)
+ptcra.integrated1$celltype.case_control <- paste(ptcra.integrated1$celltype, ptcra.integrated1$case_control, sep = "_")
+
+Idents(ptcra.integrated1) <- "celltype.case_control"
+cd8n.set1.response <- FindMarkers(ptcra.integrated1, ident.1 = "Naive CD8 T cells_case1", ident.2 = "Naive CD8 T cells_control1")
+head(cd8n.set1.response, n = 15)
+```
+
+Visualization.    
+```{r, fig.height=12}
+FeaturePlot(ptcra.integrated1, features = c("CD8B", "TRDV1", "TRDC"), split.by = "case_control", max.cutoff = 3,
+    cols = c("grey", "red"))
+
+plots <- VlnPlot(ptcra.integrated1, features = c("CD8B", "TRDV1", "TRDC"), split.by = "case_control", group.by = "celltype",
+    pt.size = 0, combine = FALSE)
+wrap_plots(plots = plots, ncol = 1)
+```
+
+### control2 and case2 integrated  
+#### PCA and Clustering 
+```{r, eval= FALSE}
+ptcra.integrated2 <- RunPCA(ptcra.integrated2)
+ptcra.integrated2 <- RunUMAP(ptcra.integrated2, reduction = "pca", dims = 1:30)
+ptcra.integrated2 <- FindNeighbors(ptcra.integrated2, reduction = "pca", dims = 1:30)
+ptcra.integrated2 <- FindClusters(ptcra.integrated2, resolution = 0.5)
+
+```
+
+#### Visualization  
+```{r, fig.height=9, fig.width=16}
+DefaultAssay(ptcra.integrated2) <- "integrated"
+p1 <- DimPlot(ptcra.integrated2, reduction = "umap", group.by = "case_control") + theme(legend.position = "top")
+p2 <- DimPlot(ptcra.integrated2, reduction = "umap", label = TRUE, repel = TRUE) + theme(legend.position = "top")
+p1 + p2
+DimPlot(ptcra.integrated2, reduction = "umap", split.by = "case_control") + theme(legend.position = "top")
+```
+
+#### Cell type annotation using SingleR
+
+Get reference datasets from `celldex` package. Note that there are two cell type assignments, `label.main` and `label.fine`. Convert our Seurat object to single cell experiment (SCE).   
+```{r, eval = FALSE}
+# use MonacoImmuneData as reference, can also use HumanPrimaryCellAtlasData or DatabaseImmuneCellExpressionData
+monaco.ref <- celldex::MonacoImmuneData()
+
+DefaultAssay(ptcra.integrated2) <- "RNA"
+ptcra_sce2 <- as.SingleCellExperiment(DietSeurat(ptcra.integrated2))
+ptcra_sce2
+```
+
+Run `SingleR`  
+```{r, eval = FALSE}
+ptcra_sce2.monaco.main <- SingleR(test = ptcra_sce2, assay.type.test = 1, ref = monaco.ref, labels = monaco.ref$label.main)
+ptcra_sce2.monaco.fine <- SingleR(test = ptcra_sce2, assay.type.test = 1, ref = monaco.ref, labels = monaco.ref$label.fine)
+```
+
+Add the annotations to the Seurat object metadata (or replace previous labels).    
+```{r, eval = FALSE}
+ptcra.integrated2@meta.data$SingleR.labels_Monaco <- ptcra_sce2.monaco.fine$pruned.labels
+```
+
+Visualize the fine-grained annotations.  
+```{r, fig.height=10, fig.width=12}
+# Summary of general cell type annotations
+# table(ptcra_sce2.monaco.main$pruned.labels)
+# table(ptcra_sce2.monaco.fine$pruned.labels)
+ptcra.integrated2 <- SetIdent(ptcra.integrated2, value = "SingleR.labels_Monaco")
+DimPlot(ptcra.integrated2, label = TRUE , repel = TRUE, label.size = 3) + theme(legend.position = "top")
+```
+
+Plot some markers.  
+```{r}
+FeaturePlot(ptcra.integrated2,c("CCR7", "SELL","PTPRC", "IL7R","IL2RG","CD27", "CD79A", "FCGR3A", "PPBP")) 
+```
+Save object.  
+```{r, eval = FALSE}
+saveRDS(ptcra.integrated2, file="ptcra.integrated2.rds")
+```
+
+#### Identify differential expressed genes between patients vs controls for specific cell types 
+We’ve aligned the patient and control cells. We choose **Naive CD8 T cells** populations for differential expression analysis between patients and controls.
+We create a column in the meta.data slot to hold both the cell type and case_control information and switch the current ident to that column. Then we use `FindMarkers()` to find the genes that are different between patient and control "Naive CD8 T cells". 
+```{r}
+library(ggplot2)
+library(cowplot)
+theme_set(theme_cowplot())
+
+ptcra.integrated2$celltype <- Idents(ptcra.integrated2)
+ptcra.integrated2$celltype.case_control <- paste(ptcra.integrated2$celltype, ptcra.integrated2$case_control, sep = "_")
+
+Idents(ptcra.integrated2) <- "celltype.case_control"
+cd8n.set2.response <- FindMarkers(ptcra.integrated2, ident.1 = "Naive CD8 T cells_case2", ident.2 = "Naive CD8 T cells_control2")
+head(cd8n.set2.response, n = 15)
+```
+
+Visualization.    
+```{r, fig.height=12}
+FeaturePlot(ptcra.integrated2, features = c("RPS4Y1", "TXNIP", "CRIP1"), split.by = "case_control", max.cutoff = 3,
+    cols = c("grey", "red"))
+
+plots <- VlnPlot(ptcra.integrated2, features = c("RPS4Y1", "TXNIP", "CRIP1"), split.by = "case_control", group.by = "celltype",
+    pt.size = 0, combine = FALSE)
+wrap_plots(plots = plots, ncol = 1)
+```
+
+### control3 and case3 integrated  
+#### PCA and Clustering 
+```{r, eval = FALSE}
+ptcra.integrated3 <- RunPCA(ptcra.integrated3)
+ptcra.integrated3 <- RunUMAP(ptcra.integrated3, reduction = "pca", dims = 1:30)
+ptcra.integrated3 <- FindNeighbors(ptcra.integrated3, reduction = "pca", dims = 1:30)
+ptcra.integrated3 <- FindClusters(ptcra.integrated3, resolution = 0.5)
+```
+
+#### Visualization  
+```{r, fig.height=9, fig.width=16}
+DefaultAssay(ptcra.integrated3) <- "integrated"
+options(ggrepel.max.overlaps = Inf)
+p1 <- DimPlot(ptcra.integrated3, reduction = "umap", group.by = "case_control") + theme(legend.position = "top")
+p2 <- DimPlot(ptcra.integrated3, reduction = "umap", label = TRUE, repel = TRUE) + theme(legend.position = "top")
+p1 + p2
+DimPlot(ptcra.integrated3, reduction = "umap", split.by = "case_control") + theme(legend.position = "top")
+```
+
+
+#### Cell type annotation using SingleR
+Get reference datasets from `celldex` package. Note that there are two cell type assignments, `label.main` and `label.fine`. Convert our Seurat object to single cell experiment (SCE).   
+```{r, eval = FALSE}
+# use MonacoImmuneData as reference, can also use HumanPrimaryCellAtlasData or DatabaseImmuneCellExpressionData
+monaco.ref <- celldex::MonacoImmuneData()
+
+DefaultAssay(ptcra.integrated3) <- "RNA"
+ptcra_sce3 <- as.SingleCellExperiment(DietSeurat(ptcra.integrated3))
+ptcra_sce3
+```
+
+Run `SingleR`  
+```{r, eval = FALSE}
+ptcra_sce2.monaco.main <- SingleR(test = ptcra_sce3, assay.type.test = 1, ref = monaco.ref, labels = monaco.ref$label.main)
+ptcra_sce2.monaco.fine <- SingleR(test = ptcra_sce3, assay.type.test = 1, ref = monaco.ref, labels = monaco.ref$label.fine)
+```
+
+Add the annotations to the Seurat object metadata (or replace previous labels).    
+```{r, eval = FALSE}
+ptcra.integrated3@meta.data$SingleR.labels_Monaco <- ptcra_sce3.monaco.fine$pruned.labels
+```
+
+Visualize the fine-grained annotations.  
+```{r, fig.height=10, fig.width=12}
+# Summary of general cell type annotations.  
+# table(ptcra_sce3.monaco.main$pruned.labels)
+# table(ptcra_sce3.monaco.fine$pruned.labels)
+
+ptcra.integrated3 <- SetIdent(ptcra.integrated3, value = "SingleR.labels_Monaco")
+DimPlot(ptcra.integrated3, label = TRUE , repel = TRUE, label.size = 3) + theme(legend.position = "top")
+```
+
+Plot some markers.  
+```{r}
+FeaturePlot(ptcra.integrated3,c("CCR7", "SELL","PTPRC", "IL7R","IL2RG","CD27", "CD79A", "FCGR3A", "PPBP")) 
+```
+Save object.  
+```{r, eval = FALSE}
+saveRDS(ptcra.integrated3, file="ptcra.integrated3.rds")
+```
+
+#### Identify differential expressed genes between patients vs controls for specific cell types 
+We’ve aligned the patient and control cells. We choose **Naive CD8 T cells** populations for differential expression analysis between patients and controls.
+We create a column in the meta.data slot to hold both the cell type and case_control information and switch the current ident to that column. Then we use `FindMarkers()` to find the genes that are different between patient and control "Naive CD8 T cells". 
+```{r}
+library(ggplot2)
+library(cowplot)
+theme_set(theme_cowplot())
+
+ptcra.integrated3$celltype <- Idents(ptcra.integrated3)
+ptcra.integrated3$celltype.case_control <- paste(ptcra.integrated3$celltype, ptcra.integrated3$case_control, sep = "_")
+
+Idents(ptcra.integrated3) <- "celltype.case_control"
+cd8n.set3.response <- FindMarkers(ptcra.integrated3, ident.1 = "Naive CD8 T cells_case3", ident.2 = "Naive CD8 T cells_control3")
+head(cd8n.set3.response, n = 15)
+```
+
+Visualization.    
+```{r, fig.height=12}
+FeaturePlot(ptcra.integrated3, features = c("SCGB3A1", "RPL13A", "RPS16"), split.by = "case_control", max.cutoff = 3,
+    cols = c("grey", "red"))
+
+plots <- VlnPlot(ptcra.integrated3, features = c("SCGB3A1", "RPL13A", "RPS16"), split.by = "case_control", group.by = "celltype",
+    pt.size = 0, combine = FALSE)
+wrap_plots(plots = plots, ncol = 1)
+```
+
+
