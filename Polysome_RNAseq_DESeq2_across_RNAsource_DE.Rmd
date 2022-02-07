@@ -1,0 +1,214 @@
+---
+title: "Differential expression test for nutrient deprivation effect across RNA sources"
+author: "Chao Di, dic@email.chop.edu"
+output:
+  html_document:
+    number_sections: false
+    code_folding: show
+---
+## Abstract {-}
+This project is for dissecting the transcriptome changes between nutrient deprivations and normal primary mouse (C57B6) T cells. The methods used here for differential gene expression analysis is DESeq2.
+
+```{r setup, include=FALSE}
+# replace with path where you want the results be
+knitr::opts_knit$set(root.dir="/Users/dic/Documents/Will Bailis lab/Polysome_profiling/DESeq2")
+knitr::opts_chunk$set(message = FALSE, 
+                      warning = FALSE, 
+                      tidy = TRUE,
+                      # fig.width = 10, 
+                      tidy.opts = list(width.cutoff = 95), root.dir="/Users/dic/Documents/Will Bailis lab/Polysome_profiling/DESeq2")
+```
+
+```{r include=FALSE}
+# set home dir when test in console 
+setwd("/Users/dic/Documents/Will Bailis lab/Polysome_profiling/DESeq2")
+library(DESeq2)
+library(ggplot2)
+library(dplyr)
+library(EnhancedVolcano)
+```
+
+## Overview of the data
+Load read counts and do data transformation.    
+Supply with raw read counts table "all_readCount.tsv" calculated from STAR/HT-seq, and sample info "sample_contrast.tsv", do value transformation and normalization (variance stabilizing transformations (VST)) in DESeq2.  
+```{r}
+cts <- read.table("all_readCount.tsv", header=TRUE, row.names = 1, sep="\t")
+colnames(cts) <- colnames(cts) %>% sub(".bam","",.) %>% sub("X..\\.","",.)
+cts <- cts[,order(colnames(cts))] # reorder by column names
+
+coldata <- read.table("sample_table.tsv", header=TRUE, row.names="sample",sep="\t", check.names=FALSE)
+rownames(coldata) <- rownames(coldata) %>% sub("..-","",.) %>% gsub("-",".",.)
+coldata <- coldata[order(rownames(coldata)),] # reorder by row names
+head(coldata)
+coldata$condition <- factor(coldata$condition)
+coldata$source <- factor(coldata$source)
+```
+
+## Fit model with factors interaction design {.tabset}
+This is to do DE analysis for nutrient deprivation effect across different RNA sources: Input, Monosome and Polysome.  
+
+Load `dds2` object insteading of running the following codes again  
+```{r}
+dds2 <- readRDS(file="dds2_obj.rds")
+resultsNames(dds2)
+# count transformation, log2 scale, either rlog or vst
+vsd2 <- vst(dds2, blind=FALSE)
+```
+
+```{r, eval = FALSE}
+dds2 <- DESeqDataSetFromMatrix(countData=cts, colData=coldata, design = ~ source + condition + source:condition)
+# relevel
+dds2$source <- relevel(dds2$source, "Input")
+dds2$condition <- relevel(dds2$condition, "Control")
+# genes have at least 10 reads in at least 5 samples
+dds2 <- dds2[rowSums(counts(dds2) >= 10) >= 5,]
+# normalization and pre-processing
+dds2 <- DESeq(dds2)
+saveRDS(dds2, file="dds2_obj.rds")
+```
+  
+Load lncRNA annotation using `annotatr`  
+```{r}
+lncRNA_anno <- annotatr::build_annotations(genome = 'mm10', annotations = 'mm10_lncrna_gencode')
+lncRNA_anno_df <- data.frame(lncRNA_anno@elementMetadata)
+```
+
+**Important Notes**:
+In this model, gene expression is determined by two factors/variables(x): RNA source (Input, Monosome and Polysome) and condition (Control, NoArginine, NoBCAA, NoGlucose, NoGlutamine and NoMethionine). The reference levels for categorical factors forms the foundation of the intereptation, they are chosen alphabetically by default. Here the `Input` is chosen as the reference level for `source`, and the `Control" is the reference level for `condition`.  
+
+The key point to remember about designs with interaction terms is that, unlike for a design `~source + condition`, where the condition effect represents the overall effect controlling for differences due to `source`, by adding `genotype:condition`, the main condition effect only represents the effect of `condition` for the reference level of source (Input here). For example,  "condition_NoArginine_vs_Control" is the effect of `NoArginine vs Control` for `Input RNA`
+
+The interaction term `source:condition` in the design formula  gives the difference between the condition effect for a given 'source' and the condition effect for the reference 'source'. This is we wanted to find: if the condition effect is different across RNA source. For example, "sourcePooledMonosome.conditionNoArginine" is the difference between effect of `NoArginine` in `Monosome` and the effect of `NoArginine` in `Input`.
+
+Please check the rationale at [DESeq2 experimental design and interpretation] (https://rstudio-pubs-static.s3.amazonaws.com/329027_593046fb6d7a427da6b2c538caf601e1.html)  
+
+
+Set significance cutoff  
+```{r}
+pcut <- 0.05
+lg2FC <- 1
+```
+
+DE function for nutrient deprivation effect between Monosome/Polysome and Input
+```{r}
+DEgenes <- function(RNAsource) {
+    resdata <- as.data.frame(assay(vsd2))
+    for (each in c("NoArginine", "NoBCAA", "NoGlucose", "NoGlutamine", "NoMethionine")){
+        var <- paste0("sourcePooled", RNAsource, ".condition", each) 
+        comp <- paste0(each, " effect between ", RNAsource, " and Input")
+        print(comp)
+        res = results(dds2, name = var)
+        up_gene = res[which(res$padj <= pcut & res$log2FoldChange >= lg2FC),]
+        down_gene = res[which(res$padj <= pcut & res$log2FoldChange <= -lg2FC),]
+        cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+        
+        ## combine all DE results with norm counts
+        res_out <- as.data.frame(res)[,c(2,6)]
+        colnames(res_out) <- paste0(each, "_", colnames(res_out))
+        resdata <- cbind(resdata, res_out)
+        
+        ## volcano plot
+        # label genes with lowest padj
+        top20 = res[order(res$padj),][1:20,]
+        # only red color padj<0.05 and log2FC>=1 as significant
+        keyvals <- ifelse(rownames(res) %in% rownames(res[!is.na(res$padj) & res$padj <= 0.05 & abs(res$log2FoldChange) >= 1,]), 'red', 'blue')
+        names(keyvals)[keyvals == 'red'] <- 'padj<=0.05 & |log2FC|>=1'
+        names(keyvals)[keyvals == 'blue'] <- 'Non-significant'
+        # A typical usage situation would be to pass nominal [un-adjusted] p-values as 'y', but adjusted p-values as pCutoffCol. In this way, a plot is generated via -log10(unadjusted p-value), but cut-offs based on adjusted p-values.
+        volcano <- EnhancedVolcano(
+            res,
+            lab = rownames(res),
+            selectLab = rownames(top20),
+            x = 'log2FoldChange',
+            y = 'pvalue',
+            ylim = c(0, -log10(min(res$pvalue[res$pvalue>0])) + 1),
+            ylab = bquote(~-Log[10] ~ italic(Pvalue)),
+            title = comp,
+            subtitle = "",
+            pCutoff = 0.05, # cutoff line for 'pCutoffCol'
+            pCutoffCol = "padj",
+            FCcutoff = 1,
+            pointSize = 2,
+            labSize = 4,
+            colCustom = keyvals,
+            drawConnectors = TRUE,
+            widthConnectors = 0.5,
+            typeConnectors = 'open',
+            colConnectors = 'grey') +
+            theme(plot.title = element_text(hjust = 0.5))
+    
+        print(volcano)
+    }
+    resdata$lncRNA_anno <- ifelse(rownames(resdata) %in% lncRNA_anno_df$symbol, "yes", "no")
+    write.table(data.frame("GeneSymbol"=rownames(resdata), resdata), file = paste0("nutrient_dep_effect_", RNAsource, "_vs_Input.tsv"), sep="\t", quote=FALSE, row.names=FALSE)
+    
+}
+```
+
+### Monosome vs Input
+Nutrient deprivation effects between Monosome and Input  
+```{r, fig.height=8, fig.width=7}
+DEgenes("Monosome")
+```
+  
+### Polysome vs Input
+Nutrient deprivation effects between Polysome and Input  
+```{r, fig.height=8, fig.width=7}
+DEgenes("Polysome")
+```
+
+### Polysome vs Monosome
+Nutrient deprivation effects between Polysome and Monosome  
+```{r, fig.height=8, fig.width=7}
+resdata <- as.data.frame(assay(vsd2))
+for (each in c("NoArginine", "NoBCAA", "NoGlucose", "NoGlutamine", "NoMethionine")){
+    var1 <- paste0("sourcePooledMonosome.condition", each)
+    var2 <- paste0("sourcePooledPolysome.condition", each)
+    var2_vs_var1 <- list(var2, var1)
+    comp <- paste0(each, " effect between Polysome and Monosome")
+    print(comp)
+    res = results(dds2, contrast = var2_vs_var1)
+    up_gene = res[which(res$padj <= pcut & res$log2FoldChange >= lg2FC),]
+    down_gene = res[which(res$padj <= pcut & res$log2FoldChange <= -lg2FC),]
+    cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+    # combine all DE results with norm counts
+    res_out <- as.data.frame(res)[,c(2,6)]
+    colnames(res_out) <- paste0(each, "_", colnames(res_out))
+    resdata <- cbind(resdata, res_out)
+
+    ## volcano plot
+    # label genes with lowest padj
+    top20 = res[order(res$padj),][1:20,]
+    # only red color padj<0.05 and log2FC>=1 as significant
+    keyvals <- ifelse(rownames(res) %in% rownames(res[!is.na(res$padj) & res$padj <= 0.05 & abs(res$log2FoldChange) >= 1,]), 'red', 'blue')
+    names(keyvals)[keyvals == 'red'] <- 'padj<=0.05 & |log2FC|>=1'
+    names(keyvals)[keyvals == 'blue'] <- 'Non-significant'
+    # A typical usage situation would be to pass nominal [un-adjusted] p-values as 'y', but adjusted p-values as pCutoffCol. In this way, a plot is generated via -log10(unadjusted p-value), but cut-offs based on adjusted p-values.
+    volcano <- EnhancedVolcano(
+        res,
+        lab = rownames(res),
+        selectLab = rownames(top20),
+        x = 'log2FoldChange',
+        y = 'pvalue',
+        ylim = c(0, -log10(min(res$pvalue[res$pvalue>0])) + 1),
+        ylab = bquote(~-Log[10] ~ italic(Pvalue)),
+        title = comp,
+        subtitle = "",
+        pCutoff = 0.05, # cutoff line for 'pCutoffCol'
+        pCutoffCol = "padj",
+        FCcutoff = 1,
+        pointSize = 2,
+        labSize = 4,
+        colCustom = keyvals,
+        drawConnectors = TRUE,
+        widthConnectors = 0.5,
+        typeConnectors = 'open',
+        colConnectors = 'grey') +
+        theme(plot.title = element_text(hjust = 0.5))
+
+    print(volcano)
+}
+    resdata$lncRNA_anno <- ifelse(rownames(resdata) %in% lncRNA_anno_df$symbol, "yes", "no")
+    write.table(data.frame("GeneSymbol"=rownames(resdata), resdata), file = "nutrient_dep_effect_Polysome_vs_Monosome.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+
+```

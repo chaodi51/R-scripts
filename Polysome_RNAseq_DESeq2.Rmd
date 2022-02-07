@@ -1,0 +1,459 @@
+---
+title: "Differential expression (DESeq2) and GSEA nalysis for polysome RNA-seq"
+author: "Chao Di, dic@email.chop.edu"
+output:
+  html_document:
+    number_sections: false
+    code_folding: show
+---
+## Abstract {-}
+This project is for dissecting the transcriptome changes between nutrient deprivations and normal primary mouse (C57B6) T cells. The methods used here for differential gene expression analysis is DESeq2.
+
+```{r setup, include=FALSE}
+# replace with path where you want the results be
+knitr::opts_knit$set(root.dir="/Users/dic/Documents/Will Bailis lab/Polysome_profiling/DESeq2")
+knitr::opts_chunk$set(message = FALSE, 
+                      warning = FALSE, 
+                      tidy = TRUE,
+                      # fig.width = 10, 
+                      tidy.opts = list(width.cutoff = 95), root.dir="/Users/dic/Documents/Will Bailis lab/Polysome_profiling/DESeq2")
+```
+
+```{r include=FALSE}
+# set home dir when test in console 
+setwd("/Users/dic/Documents/Will Bailis lab/Polysome_profiling/DESeq2")
+library(DESeq2)
+library(apeglm)
+library(ashr)
+library(pheatmap)
+library(genefilter)
+library(ggplot2)
+library(RColorBrewer)
+library(fdrtool)
+library(EnhancedVolcano)
+library(fgsea)
+library(KEGGREST)
+library(EnrichmentBrowser)
+library(dplyr)
+library(tibble)
+library(data.table)
+library(org.Mm.eg.db)
+library(msigdbr)
+library(annotatr)
+library(usedist)
+# library(reshape2)
+library(spaa)
+```
+
+
+## Overview of the data
+Load read counts and do data transformation.    
+Supply with raw read counts table "all_readCount.tsv" calculated from STAR/HT-seq, and sample info "sample_contrast.tsv", do value transformation and normalization (variance stabilizing transformations (VST)) in DESeq2.  
+```{r}
+cts <- read.table("all_readCount.tsv", header=TRUE, row.names = 1, sep="\t")
+colnames(cts) <- colnames(cts) %>% sub(".bam","",.) %>% sub("X..\\.","",.)
+cts <- cts[,order(colnames(cts))] # reorder by column names
+
+coldata <- read.table("sample_table.tsv", header=TRUE, row.names="sample",sep="\t", check.names=FALSE)
+rownames(coldata) <- rownames(coldata) %>% sub("..-","",.) %>% gsub("-",".",.)
+coldata <- coldata[order(rownames(coldata)),] # reorder by row names
+head(coldata)
+coldata$condition <- factor(coldata$condition)
+coldata$source <- factor(coldata$source)
+```
+
+load saved dds obj without running codes again.     
+```{r}
+dds <- readRDS("dds_obj.rds")
+resultsNames(dds)
+```
+
+```{r, eval=FALSE}
+# load the counts with no design
+dds <- DESeqDataSetFromMatrix(countData=cts, colData=coldata, design =~ 1)
+dds$group <- factor(paste0(dds$source, dds$condition))
+design(dds) <- ~ group
+
+# genes have at least 10 reads in at least 5 samples
+dds <- dds[rowSums(counts(dds) >= 10) >= 5,]
+
+# normalization and pre-processing
+dds <- DESeq(dds)
+saveRDS(dds, file="dds_obj.rds")
+```
+
+```{r}
+# raw count normalization
+norm_counts <- counts(dds, normalized=TRUE) 
+# count transformation, log2 scale, either rlog or vst
+vsd <- vst(dds, blind=FALSE)
+cat("The data values after transformation:\n")
+head(assay(vsd)[,1:6])
+```
+
+### PCA plot  
+The PCA plot shows the samples in the 2D plane spanned by their first two principal components. This type of plot is useful for visualizing the overall effect of experimental covariates and batch effects.  
+```{r echo = FALSE}
+
+pcaData <- plotPCA(vsd, intgroup=c("source","condition"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=condition, shape=source)) +
+  geom_point(size =3)+
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance"))
+  # coord_fixed()
+
+# PCA for Input RNA
+vsd_Input <- vsd[, vsd$source == "Input"]
+pcaData <- plotPCA(vsd_Input, intgroup=c("source","condition"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=condition, shape=source)) +
+  geom_point(size =3)+
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance"))
+  # coord_fixed()
+
+# PCA for Monosome
+vsd_Monosome <- vsd[, vsd$source == "PooledMonosome"]
+pcaData <- plotPCA(vsd_Monosome, intgroup=c("source","condition"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=condition, shape=source)) +
+  geom_point(size =3)+
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance"))
+  # coord_fixed()
+
+# PCA for Polysome
+vsd_Polysome <- vsd[, vsd$source == "PooledPolysome"]
+pcaData <- plotPCA(vsd_Polysome, intgroup=c("source","condition"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=condition, shape=source)) +
+  geom_point(size =3)+
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance"))
+  # coord_fixed()
+```
+
+
+### Heatmap for expression matrix
+Heatmap showing the expressions of the most variable genes (top 50 here), optional to do clustering between samples. This gives us the information of which samples and which genes are close to each other.  
+```{r fig.height=10, fig.width=10}
+# heatmap of the count matrix
+select <- head(order(-rowVars(assay(vsd))),50) # most variable genes
+pdata <- assay(vsd)[select,]
+df <- as.data.frame(colData(dds)[,c("condition","source")])
+rownames(df) <- rownames(colData(dds))
+
+pheatmap(pdata, cluster_rows=TRUE, show_rownames=TRUE,
+         cluster_cols=TRUE, annotation_col=df)
+```
+
+### heatmap of sample-sample distance
+Apply the `dist` function to the transpose of the transformed count matrix to get sample-to-sample distances. A heatmap of distance matrix gives us an overview over similarities and dissimilarities between samples. Provide a hierarchical clustering hc to the heatmap function based on the sample distances, or else the heatmap function would calculate a clustering based on the distances between the rows/columns of the distance matrix.  
+```{r fig.height=9, fig.width=9}
+# heatmap of sample-sample distances
+sampleDists = dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(vsd$source, vsd$condition, vsd$rep, sep="_")
+colnames(sampleDistMatrix) <- rownames(sampleDistMatrix)
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+```
+
+Compare sample-sample distances distribution between three methods.  
+```{r, fig.height=5, fig.width=4}
+InputDists <- dist_subset(sampleDists, colnames(vsd_Input))
+MonosomeDists <- dist_subset(sampleDists, colnames(vsd_Monosome))
+PolysomeDists <- dist_subset(sampleDists, colnames(vsd_Polysome))
+
+# pair wise comparison
+Input_pairlist <- dist2list(InputDists)
+Input_pairlist <- Input_pairlist[as.numeric(Input_pairlist$col) > as.numeric(Input_pairlist$row), ]
+
+Monosome_pairlist <- dist2list(MonosomeDists)
+Monosome_pairlist <- Monosome_pairlist[as.numeric(Monosome_pairlist$col) > as.numeric(Monosome_pairlist$row), ]
+
+Polysome_pairlist <- dist2list(PolysomeDists)
+Polysome_pairlist <- Polysome_pairlist[as.numeric(Polysome_pairlist$col) > as.numeric(Polysome_pairlist$row), ]
+
+Input_pairlist$Input <- "Input"
+colnames(Input_pairlist)[3] <- "Input_dist"
+Monosome_pairlist$Monosome <- "Monosome"
+colnames(Monosome_pairlist)[3] <- "Monosome_dist"
+Polysome_pairlist$Polysome <- "Polysome"
+colnames(Polysome_pairlist)[3] <- "Polysome_dist"
+pair_lists <- cbind(Input_pairlist[,3:4], Monosome_pairlist[,3:4], Polysome_pairlist[,3:4])
+
+
+mm <- melt(pair_lists)
+p <- ggplot(mm, aes(x=variable, y=value, color=variable)) +
+  geom_violin() +
+  geom_boxplot(width=0.1, color="grey") +
+  theme_classic() +
+  theme(axis.text.x = element_blank()) + 
+  ylab("Sample-Sample Distance") +
+  xlab("RNA source")
+p  
+dev.off()
+```
+
+Wilcoxon rank sum test to compare the distance between methods    
+```{r}
+# Wilcoxon rank sum test 
+Input_Monosome_p <- wilcox.test(pair_lists$Input_dist, pair_lists$Monosome_dist, alternative = "two.sided")$p.value
+Input_Polyosome_p <- wilcox.test(pair_lists$Input_dist, pair_lists$Polysome_dist, alternative = "two.sided")$p.value
+Monosome_Polysome_p <- wilcox.test(pair_lists$Monosome_dist, pair_lists$Polysome_dist, alternative = "two.sided")$p.value
+cat(paste0("Input vs Monosome p-value: ", Input_Monosome_p, "\n"))
+cat(paste0("Input vs Polyosome p-value: ", Input_Polyosome_p, "\n"))
+cat(paste0("Monosome vs Polyosome p-value: ", Monosome_Polysome_p,"\n"))
+
+```
+
+
+### Differential expression analysis by `DESeq2`
+Calculation of expression values (log2 scale), transformed by variance stabilizing transformations (VST).
+Setup contrast as disease vs HC in different age groups: Young, Adults, Older, Oldest etc (grouping variate for different diseases). Export tables with the standard DESeq2 result format including "baseMean log2FoldChange lfcSE stat pvalue padj" plus the "Log fold change shrinked" normalized readcounts )  
+
+Load lncRNA annotation using `annotatr`  
+```{r}
+lncRNA_anno <- annotatr::build_annotations(genome = 'mm10', annotations = 'mm10_lncrna_gencode')
+lncRNA_anno_df <- data.frame(lncRNA_anno@elementMetadata)
+```
+
+Set significance cutoff  
+```{r}
+pcut <- 0.05
+lg2FC <- 1
+```
+#### Input RNA 
+```{r}
+## NoArginine
+res_Input_NoArginine <- results(dds, contrast=c("group", "InputNoArginine","InputControl"))
+# report # up/down genes
+up_gene = res_Input_NoArginine[which(res_Input_NoArginine$padj <= pcut & res_Input_NoArginine$log2FoldChange >= lg2FC),]
+down_gene = res_Input_NoArginine[which(res_Input_NoArginine$padj <= pcut & res_Input_NoArginine$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## NoBCAA
+res_Input_NoBCAA <- results(dds, contrast=c("group", "InputNoBCAA","InputControl"))
+## report # up/down genes
+up_gene = res_Input_NoBCAA[which(res_Input_NoBCAA$padj <= pcut & res_Input_NoBCAA$log2FoldChange >= lg2FC),]
+down_gene = res_Input_NoBCAA[which(res_Input_NoBCAA$padj <= pcut & res_Input_NoBCAA$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## NoGlucose
+res_Input_NoGlucose <- results(dds, contrast=c("group", "InputNoGlucose","InputControl"))
+## report # up/down genes
+up_gene = res_Input_NoGlucose[which(res_Input_NoGlucose$padj <= pcut & res_Input_NoGlucose$log2FoldChange >= lg2FC),]
+down_gene = res_Input_NoGlucose[which(res_Input_NoGlucose$padj <= pcut & res_Input_NoGlucose$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## NoGlutamine
+res_Input_NoGlutamine <- results(dds, contrast=c("group", "InputNoGlutamine","InputControl"))
+## report # up/down genes
+up_gene = res_Input_NoGlutamine[which(res_Input_NoGlutamine$padj <= pcut & res_Input_NoGlutamine$log2FoldChange >= lg2FC),]
+down_gene = res_Input_NoGlutamine[which(res_Input_NoGlutamine$padj <= pcut & res_Input_NoGlutamine$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## NoMethionine
+res_Input_NoMethionine <- results(dds, contrast=c("group", "InputNoMethionine","InputControl"))
+## report # up/down genes
+up_gene = res_Input_NoMethionine[which(res_Input_NoMethionine$padj <= pcut & res_Input_NoMethionine$log2FoldChange >= lg2FC),]
+down_gene = res_Input_NoMethionine[which(res_Input_NoMethionine$padj <= pcut & res_Input_NoMethionine$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## merge diff results with normalized count data and output the table
+df_vsd_Input = as.data.frame(assay(vsd_Input))
+lst1 <- as.data.frame(res_Input_NoArginine)[,c(2,6)]
+colnames(lst1) <- paste0("NoArginine_", colnames(lst1))
+
+lst2 <- as.data.frame(res_Input_NoBCAA)[,c(2,6)]
+colnames(lst2) <- paste0("NoBCAA_", colnames(lst2))
+
+lst3 <- as.data.frame(res_Input_NoGlucose)[,c(2,6)]
+colnames(lst3) <- paste0("NoGlucose_", colnames(lst3))
+
+lst4 <- as.data.frame(res_Input_NoGlutamine)[,c(2,6)]
+colnames(lst4) <- paste0("NoGlutamine_", colnames(lst4))
+
+lst5 <- as.data.frame(res_Input_NoMethionine)[,c(2,6)]
+colnames(lst5) <- paste0("NoMethionine_", colnames(lst5))
+
+resdata <- cbind(df_vsd_Input, lst1, lst2, lst3, lst4, lst5)
+resdata$lncRNA_anno <- ifelse(rownames(resdata) %in% lncRNA_anno_df$symbol, "yes", "no")
+
+write.table(data.frame("GeneSymbol"=rownames(resdata),resdata), file="InputRNA.diffexp.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+```
+
+#### Monosome 
+```{r}
+## NoArginine
+res_PooledMonosome_NoArginine <- results(dds, contrast=c("group", "PooledMonosomeNoArginine","PooledMonosomeControl"))
+# report # up/down genes
+up_gene = res_PooledMonosome_NoArginine[which(res_PooledMonosome_NoArginine$padj <= pcut & res_PooledMonosome_NoArginine$log2FoldChange >= lg2FC),]
+down_gene = res_PooledMonosome_NoArginine[which(res_PooledMonosome_NoArginine$padj <= pcut & res_PooledMonosome_NoArginine$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## NoBCAA
+res_PooledMonosome_NoBCAA <- results(dds, contrast=c("group", "PooledMonosomeNoBCAA","PooledMonosomeControl"))
+## report # up/down genes
+up_gene = res_PooledMonosome_NoBCAA[which(res_PooledMonosome_NoBCAA$padj <= pcut & res_PooledMonosome_NoBCAA$log2FoldChange>= lg2FC),]
+down_gene = res_PooledMonosome_NoBCAA[which(res_PooledMonosome_NoBCAA$padj <= pcut & res_PooledMonosome_NoBCAA$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## NoGlucose
+res_PooledMonosome_NoGlucose <- results(dds, contrast=c("group", "PooledMonosomeNoGlucose","PooledMonosomeControl"))
+## report # up/down genes
+up_gene = res_PooledMonosome_NoGlucose[which(res_PooledMonosome_NoGlucose$padj <= pcut & res_PooledMonosome_NoGlucose$log2FoldChange >= lg2FC),]
+down_gene = res_PooledMonosome_NoGlucose[which(res_PooledMonosome_NoGlucose$padj <= pcut & res_PooledMonosome_NoGlucose$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## NoGlutamine
+res_PooledMonosome_NoGlutamine <- results(dds, contrast=c("group", "PooledMonosomeNoGlutamine","PooledMonosomeControl"))
+## report # up/down genes
+up_gene = res_PooledMonosome_NoGlutamine[which(res_PooledMonosome_NoGlutamine$padj <= pcut & res_PooledMonosome_NoGlutamine$log2FoldChange >= lg2FC),]
+down_gene = res_PooledMonosome_NoGlutamine[which(res_PooledMonosome_NoGlutamine$padj <= pcut & res_PooledMonosome_NoGlutamine$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## NoMethionine
+res_PooledMonosome_NoMethionine <- results(dds, contrast=c("group", "PooledMonosomeNoMethionine","PooledMonosomeControl"))
+## report # up/down genes
+up_gene = res_PooledMonosome_NoMethionine[which(res_PooledMonosome_NoMethionine$padj <= pcut & res_PooledMonosome_NoMethionine$log2FoldChange >= lg2FC),]
+down_gene = res_PooledMonosome_NoMethionine[which(res_PooledMonosome_NoMethionine$padj <= pcut & res_PooledMonosome_NoMethionine$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## merge diff results with normalized count data and output the table
+df_vsd_Monosome = as.data.frame(assay(vsd_Monosome))
+lst1 <- as.data.frame(res_PooledMonosome_NoArginine)[,c(2,6)]
+colnames(lst1) <- paste0("NoArginine_", colnames(lst1))
+
+lst2 <- as.data.frame(res_PooledMonosome_NoBCAA)[,c(2,6)]
+colnames(lst2) <- paste0("NoBCAA_", colnames(lst2))
+
+lst3 <- as.data.frame(res_PooledMonosome_NoGlucose)[,c(2,6)]
+colnames(lst3) <- paste0("NoGlucose_", colnames(lst3))
+
+lst4 <- as.data.frame(res_PooledMonosome_NoGlutamine)[,c(2,6)]
+colnames(lst4) <- paste0("NoGlutamine_", colnames(lst4))
+
+lst5 <- as.data.frame(res_PooledMonosome_NoMethionine)[,c(2,6)]
+colnames(lst5) <- paste0("NoMethionine_", colnames(lst5))
+
+resdata <- cbind(df_vsd_Monosome, lst1, lst2, lst3, lst4, lst5)
+resdata$lncRNA_anno <- ifelse(rownames(resdata) %in% lncRNA_anno_df$symbol, "yes", "no")
+
+write.table(data.frame("GeneSymbol"=rownames(resdata),resdata), file="PooledMonosome.diffexp.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+```
+
+#### Polysome
+```{r}
+## NoArginine
+res_PooledPolysome_NoArginine <- results(dds, contrast=c("group", "PooledPolysomeNoArginine","PooledPolysomeControl"))
+# report # up/down genes
+up_gene = res_PooledPolysome_NoArginine[which(res_PooledPolysome_NoArginine$padj <= pcut & res_PooledPolysome_NoArginine$log2FoldChange >= lg2FC),]
+down_gene = res_PooledPolysome_NoArginine[which(res_PooledPolysome_NoArginine$padj <= pcut & res_PooledPolysome_NoArginine$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## NoBCAA
+res_PooledPolysome_NoBCAA <- results(dds, contrast=c("group", "PooledPolysomeNoBCAA","PooledPolysomeControl"))
+## report # up/down genes
+up_gene = res_PooledPolysome_NoBCAA[which(res_PooledPolysome_NoBCAA$padj <= pcut & res_PooledPolysome_NoBCAA$log2FoldChange >= lg2FC),]
+down_gene = res_PooledPolysome_NoBCAA[which(res_PooledPolysome_NoBCAA$padj <= pcut & res_PooledPolysome_NoBCAA$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## NoGlucose
+res_PooledPolysome_NoGlucose <- results(dds, contrast=c("group", "PooledPolysomeNoGlucose","PooledPolysomeControl"))
+## report # up/down genes
+up_gene = res_PooledPolysome_NoGlucose[which(res_PooledPolysome_NoGlucose$padj <= pcut & res_PooledPolysome_NoGlucose$log2FoldChange >= lg2FC),]
+down_gene = res_PooledPolysome_NoGlucose[which(res_PooledPolysome_NoGlucose$padj <= pcut & res_PooledPolysome_NoGlucose$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## NoGlutamine
+res_PooledPolysome_NoGlutamine <- results(dds, contrast=c("group", "PooledPolysomeNoGlutamine","PooledPolysomeControl"))
+## report # up/down genes
+up_gene = res_PooledPolysome_NoGlutamine[which(res_PooledPolysome_NoGlutamine$padj <= pcut & res_PooledPolysome_NoGlutamine$log2FoldChange >= lg2FC),]
+down_gene = res_PooledPolysome_NoGlutamine[which(res_PooledPolysome_NoGlutamine$padj <= pcut & res_PooledPolysome_NoGlutamine$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## NoMethionine
+res_PooledPolysome_NoMethionine <- results(dds, contrast=c("group", "PooledPolysomeNoMethionine","PooledPolysomeControl"))
+## report # up/down genes
+up_gene = res_PooledPolysome_NoMethionine[which(res_PooledPolysome_NoMethionine$padj <= pcut & res_PooledPolysome_NoMethionine$log2FoldChange >= lg2FC),]
+down_gene = res_PooledPolysome_NoMethionine[which(res_PooledPolysome_NoMethionine$padj <= pcut & res_PooledPolysome_NoMethionine$log2FoldChange <= -lg2FC),]
+cat(paste0("padj<=0.05 & log2FC>=1: # Up = ", length(up_gene$padj),"  # Down = ", length(down_gene$padj),"\n"))
+
+## merge diff results with normalized count data and output the table
+df_vsd_Polysome = as.data.frame(assay(vsd_Polysome))
+lst1 <- as.data.frame(res_PooledPolysome_NoArginine)[,c(2,6)]
+colnames(lst1) <- paste0("NoArginine_", colnames(lst1))
+
+lst2 <- as.data.frame(res_PooledPolysome_NoBCAA)[,c(2,6)]
+colnames(lst2) <- paste0("NoBCAA_", colnames(lst2))
+
+lst3 <- as.data.frame(res_PooledPolysome_NoGlucose)[,c(2,6)]
+colnames(lst3) <- paste0("NoGlucose_", colnames(lst3))
+
+lst4 <- as.data.frame(res_PooledPolysome_NoGlutamine)[,c(2,6)]
+colnames(lst4) <- paste0("NoGlutamine_", colnames(lst4))
+
+lst5 <- as.data.frame(res_PooledPolysome_NoMethionine)[,c(2,6)]
+colnames(lst5) <- paste0("NoMethionine_", colnames(lst5))
+
+resdata <- cbind(df_vsd_Polysome, lst1, lst2, lst3, lst4, lst5)
+resdata$lncRNA_anno <- ifelse(rownames(resdata) %in% lncRNA_anno_df$symbol, "yes", "no")
+
+write.table(data.frame("GeneSymbol"=rownames(resdata),resdata), file="PooledPolysome.diffexp.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+
+```
+
+### Volcano plots
+Top20 differential genes are labeled on the plots.  
+```{r fig.height=8, fig.width=7}
+for (source in c("Input", "PooledMonosome", "PooledPolysome")){
+    for (each in c("NoArginine", "NoBCAA", "NoGlucose", "NoGlutamine", "NoMethionine")){
+      comp <- paste(source, each, "vs_control", sep="_") 
+      res = get(paste("res",source, each, sep="_"))
+      
+      # label genes with lowest padj
+      top20 = res[order(res$padj),][1:20,]
+    
+      # only red color padj<0.05 and log2FC>=1 as significant
+    keyvals <- ifelse(
+         rownames(res) %in% rownames(res[!is.na(res$padj) & res$padj <= 0.05 & abs(res$log2FoldChange) >= 1,]), 'red', 'blue')
+    names(keyvals)[keyvals == 'red'] <- 'padj<=0.05 & |log2FC|>=1'
+    names(keyvals)[keyvals == 'blue'] <- 'Non-significant'
+    ## A typical usage situation would be to pass nominal [un-adjusted] p-values as 'y', but adjusted p-values as pCutoffCol. In this way, a plot is generated via -log10(unadjusted p-value), but cut-offs based on adjusted p-values.
+      volcano <- EnhancedVolcano(
+          res,
+          lab = rownames(res),
+          selectLab = rownames(top20),
+          x = 'log2FoldChange',
+          y = 'pvalue',
+          ylim = c(0, -log10(min(res$pvalue[res$pvalue>0])) + 1),
+          ylab = bquote(~-Log[10] ~ italic(Pvalue)),
+          title = comp,
+          subtitle = "",
+          pCutoff = 0.05, # cutoff line for 'pCutoffCol'
+          pCutoffCol = "padj",
+          FCcutoff = 1,
+          pointSize = 2,
+          labSize = 4,
+          colCustom = keyvals,
+          drawConnectors = TRUE,
+          widthConnectors = 0.5,
+          typeConnectors = 'open',
+          colConnectors = 'grey') +
+          theme(plot.title = element_text(hjust = 0.5))
+    
+      print(volcano)
+    }
+}
+```
+
+#### Save the DESeq work space for later use.  
+```{r}
+# save.image(file = "DESeq2_work_space.RData")
+```

@@ -1,0 +1,276 @@
+---
+title: "Differential translation and functional analysis"
+author: "Chao Di, dic@email.chop.edu"
+output:
+  html_document:
+    number_sections: false
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+# replace with path where you want the results be
+knitr::opts_knit$set(root.dir="/Users/dic/Documents/Will Bailis lab/Polysome_profiling")
+knitr::opts_chunk$set(message = FALSE, 
+                      warning = FALSE, 
+                      tidy = TRUE,
+                      # fig.width = 10, 
+                      tidy.opts = list(width.cutoff = 95), root.dir="/Users/dic/Documents/Will Bailis lab/Polysome_profiling")
+```
+
+## Abstract
+`anota2seq` allows specific identification of an under appreciated mode of gene expression regulation whereby translation acts as a buffering mechanism which maintains protein levels despite fluctuations in corresponding mRNA abundance (‘translational buffering’).  
+During analysis of the resulting data, three modes for regulation of gene expression can be assessed: changes in **mRNA abundance** (i.e. similar changes in total mRNA levels and levels of translated mRNA) and changes in translational efficiency leading to changes in protein levels (real change of **translation**: a change in the amount of translated mRNA that is not explained by a change in total mRNA) or **buffering** which maintains constant levels of translated mRNA (and hence also protein levels) despite altered levels of total mRNA.  
+
+```{r include=TRUE,echo=FALSE,message = FALSE, warning = FALSE}
+library(DESeq2)
+library(pheatmap)
+library(RColorBrewer)
+library(anota2seq)
+library(dplyr)
+library(EnhancedVolcano)
+library(fgsea)
+library(gprofiler2)
+library(data.table)
+library(scales)
+# library(clusterProfiler)
+```
+
+## Overview of the data
+* Load read counts and do data transformation
+Supply with raw read counts table "all_readCount.tsv" calculated from STAR/HT-seq, and sample info "sample_contrast.tsv", do value transformation and normalization (variance stabilizing transformations (VST)) in DESeq2.
+
+```{r}
+setwd("/Users/dic/Documents/Will Bailis lab/Polysome_profiling")
+cts <- read.table("all_readCount.tsv", header=TRUE, row.names = 1, sep="\t")
+colnames(cts) <- colnames(cts) %>% sub(".bam","",.) %>% sub("X..\\.","",.)
+cts <- cts[,order(colnames(cts))] # reorder by column names
+
+coldata <- read.table("sample_table.tsv", header=TRUE, row.names="sample",sep="\t", check.names=FALSE)
+rownames(coldata) <- rownames(coldata) %>% sub("..-","",.) %>% gsub("-",".",.)
+coldata <- coldata[order(rownames(coldata)),] # reorder by row names
+
+head(coldata)
+coldata$condition <- factor(coldata$condition)
+coldata$source <- factor(coldata$source)
+
+# # load the counts
+# dds <- DESeqDataSetFromMatrix(countData=cts, colData=coldata, design = ~source + condition)
+# 
+# # genes have at least 10 reads in at least 5 samples
+# dds <- dds[rowSums(counts(dds) >= 10) >= 5,]
+# 
+# # normalization and pre-processing
+# dds <- DESeq(dds)
+# 
+# # raw count normalization
+# norm_counts <- counts(dds, normalized=TRUE)
+# # count transformation, log2 scale, either rlog or vst
+# vsd <- vst(dds, blind=FALSE)
+# cat("The data values after transformation:\n")
+# head(assay(vsd)[,1:6])
+
+```
+
+## Do differential translation by `anota2seq`
+Analysis of translational activity using anota2seq includes the following steps:
+
+1. Initialize an Anota2seqDataSet and pre-process RNA sequencing data using `anota2seqDataSetFromMatrix` or `anota2seqDataSetFromSE`. See section 3.2
+```{r}
+
+data_monosome <- cts %>% dplyr::select(contains("Monosome")) 
+head(data_monosome)[1:3]
+
+data_polysome <- cts %>% dplyr::select(contains("Polysome")) 
+head(data_polysome)[1:3]
+
+data_totalmRNA <- cts %>% dplyr::select(contains("Input")) 
+head(data_totalmRNA)[1:3]
+
+pheno_vec <- colnames(data_totalmRNA) %>% sub("Input.","",.) %>% sub(".Rep.","",.)
+
+## build custom contrast matrix
+# Get the levels of the phenoVec, these will be ordered as in anota2seq
+phenoLev <- levels(as.factor(pheno_vec))
+# Construct the matrix with appropriate nrow and ncol
+myContrast <- matrix(nrow =length(phenoLev),ncol=length(phenoLev)-1)
+# Set the phenoLev as rownames for your contrast matrix
+rownames(myContrast) <- phenoLev
+# Now indicate the contrasts you want to analyse as explained above
+# Comprisons
+myContrast[,1] <- c(-1,1,0,0,0,0)
+myContrast[,2] <- c(-1,0,1,0,0,0)
+myContrast[,3] <- c(-1,0,0,1,0,0)
+myContrast[,4] <- c(-1,0,0,0,1,0)
+myContrast[,5] <- c(-1,0,0,0,0,1)
+colnames(myContrast) <- phenoLev[-1]
+myContrast
+```
+
+Initialize Anota2seqDataSet  
+```{r}
+ads_monosome <- anota2seqDataSetFromMatrix(
+    dataP = data_monosome,
+    dataT = data_totalmRNA,
+    phenoVec = pheno_vec,
+    batchVec = c(rep(1,3), rep(2,3), rep(3,3), rep(4,3), rep(5,3), rep(6,3)),
+    dataType = "RNAseq",
+    filterZeroGenes = TRUE,
+    normalize = TRUE,
+    transformation = "TMM-log2",
+    varCutOff = NULL)
+
+ads_polysome <- anota2seqDataSetFromMatrix(
+    dataP = data_polysome,
+    dataT = data_totalmRNA,
+    phenoVec = pheno_vec,
+    batchVec = c(rep(1,3), rep(2,3), rep(3,3), rep(4,3), rep(5,3), rep(6,3)),
+    dataType = "RNAseq",
+    filterZeroGenes = TRUE,
+    normalize = TRUE,
+    transformation = "TMM-log2",
+    varCutOff = NULL)
+```
+
+Complete analysis using the one-step procedure function (not recommended)  
+```{r, eval=FALSE}
+ads_polysome <- anota2seqRun(
+    Anota2seqDataSet = ads_polysome,
+    contrasts = myContrast,
+    thresholds = list(
+    maxPAdj = 0.05,
+    minEff = 1.5),
+    performQC = FALSE,
+    performROT = FALSE,
+    useRVM = TRUE)
+```
+
+2. Assessment of model assumptions using `anota2seqPerformQC` and `anota2seqResidOutlierTest`. See section 3.3 (only run once, and won't be included in the report)
+```{r, eval = FALSE}
+ads_polysome <- anota2seqPerformQC(Anota2seqDataSet = ads_polysome,
+      generateSingleGenePlots = TRUE,
+      nReg = 16, correctionMethod = "BH", useDfb = TRUE, useDfbSim = TRUE,
+      nDfbSimData = 2000, useRVM = TRUE, onlyGroup = FALSE,
+      useProgBar = TRUE, fileStem = "ANOTA2SEQ")
+
+ads_monosome <- anota2seqPerformQC(Anota2seqDataSet = ads_monosome,
+      generateSingleGenePlots = TRUE,
+      nReg = 16, correctionMethod = "BH", useDfb = TRUE, useDfbSim = TRUE,
+      nDfbSimData = 2000, useRVM = TRUE, onlyGroup = FALSE,
+      useProgBar = TRUE, fileStem = "ANOTA2SEQ")
+
+anota2seqResidOutlierTest(Anota2seqDataSet = ads_polysome, confInt = 0.01,
+      iter = 5, generateSingleGenePlots = TRUE, nGraphs = 12,
+      generateSummaryPlot = TRUE, residFitPlot = FALSE, useProgBar = TRUE)
+
+anota2seqResidOutlierTest(Anota2seqDataSet = ads_monosome, confInt = 0.01,
+      iter = 5, generateSingleGenePlots = TRUE, nGraphs = 12,
+      generateSummaryPlot = TRUE, residFitPlot = FALSE, useProgBar = TRUE)
+
+```
+
+3. Analysis of changes in mRNA abundance and translational efficiency leading to altered
+protein levels or buffering using `anota2seqAnalyze`. See section 3.4
+
+load save `anota2seq` results instead of running codes again  
+```{r}
+load("anota2seq_data_obj.RData")
+head(anota2seqGetOutput(ads_polysome, analysis = "translation", output = "full", selContrast = 1, getRVM = TRUE))
+par(mfrow = c(1, 2))
+anota2seqPlotPvalues(ads_polysome, selContrast = 1, plotToFile = FALSE)
+
+head(anota2seqGetOutput(ads_monosome, analysis = "translation", output = "full", selContrast = 1, getRVM = TRUE))
+
+anota2seqPlotPvalues(ads_monosome, selContrast = 1, plotToFile = FALSE)
+```
+
+```{r, eval=FALSE}
+# polysome
+ads_polysome <- anota2seqAnalyze(Anota2seqDataSet = ads_polysome, contrasts = myContrast,
+      correctionMethod = "BH", useProgBar = FALSE, fileStem = "ANOTA2SEQ",
+      analysis = c("translation", "buffering", "translated mRNA", "total mRNA"))
+
+# monosome
+ads_monosome <- anota2seqAnalyze(Anota2seqDataSet = ads_monosome, contrasts = myContrast,
+      correctionMethod = "BH", useProgBar = FALSE, fileStem = "ANOTA2SEQ",
+      analysis = c("translation", "buffering", "translated mRNA", "total mRNA"))
+
+save(ads_polysome, ads_monosome), file="anota2seq_data_obj.RData"))
+```
+
+4. Selection of features and classification into modes for regulation of gene expression
+using `anota2seqSelSigGenes` and `anota2seqRegModes`. See section 3.4.4 and 3.5, respectively.
+```{r fig.height=8, fig.width=10}
+## polysome
+ads_polysome <- anota2seqSelSigGenes(Anota2seqDataSet = ads_polysome,
+      minSlopeTranslation = -1,
+      maxSlopeTranslation = 2,
+      minSlopeBuffering = -2,
+      maxSlopeBuffering = 1,
+      # minEff = log(1.5,2),
+      maxPAdj = 0.05)
+
+ads_polysome <- anota2seqRegModes(ads_polysome)
+
+## monosome
+ads_monosome <- anota2seqSelSigGenes(Anota2seqDataSet = ads_monosome,
+      minSlopeTranslation = -1,
+      maxSlopeTranslation = 2,
+      minSlopeBuffering = -2,
+      maxSlopeBuffering = 1,
+      # minEff = log(1.5,2),
+      maxPAdj = 0.05)
+
+ads_monosome <- anota2seqRegModes(ads_monosome)
+
+## get results for each contrast
+Polysome_anota2seq = data.frame(matrix(ncol = 0, nrow = dim(ads_polysome@dataP)[1]))
+Monosome_anota2seq = data.frame(matrix(ncol = 0, nrow = dim(ads_monosome@dataP)[1]))
+for(c in 1:5){
+      cat("Polysome:\n")
+      cName <- phenoLev[-1][c]
+      anota2seqPlotFC(ads_polysome, selContrast = c, plotToFile = FALSE, contrastName = cName)
+      sigGene_polysome <- anota2seqGetOutput(ads_polysome,output="singleDf",selContrast=c, getRVM = TRUE) 
+      # %>% filter(singleRegMode != "background")
+      write.table(sigGene_polysome, file=paste0("ANOTA2SEQ_table/sigGene_polysome_",cName,".tsv"), sep="\t", row.names=F)
+      # combine tables
+      colnames(sigGene_polysome) <- paste(cName, colnames(sigGene_polysome), sep="_")
+      Polysome_anota2seq <- cbind(Polysome_anota2seq, sigGene_polysome[,-1])
+      
+      cat("Monosome:\n")
+      anota2seqPlotFC(ads_monosome, selContrast = c, plotToFile = FALSE, contrastName = cName)
+      sigGene_monosome <- anota2seqGetOutput(ads_monosome,output="singleDf",selContrast=c, getRVM = TRUE) 
+      # %>% filter(singleRegMode != "background")
+      write.table(sigGene_monosome, file=paste0("ANOTA2SEQ_table/sigGene_monosome",cName,".tsv"), sep="\t", row.names=F)
+      # combine tables
+      colnames(sigGene_monosome) <- paste(cName, colnames(sigGene_monosome), sep="_")
+      Monosome_anota2seq <- cbind(Monosome_anota2seq, sigGene_monosome[,-1])
+}
+
+write.table(data.frame("GeneSymbol"=rownames(Polysome_anota2seq),Polysome_anota2seq), file="Polysome_anota2seq.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+write.table(data.frame("GeneSymbol"=rownames(Monosome_anota2seq),Monosome_anota2seq), file="Monosome_anota2seq.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+
+```
+
+## Combine Anota2seq results with DESeq2 results {-}
+```{r}
+res_polysome_diff <- read.table("DESeq2/PooledPolysome.diffexp.tsv", header=TRUE, sep="\t")
+rownames(res_polysome_diff) <- res_polysome_diff$GeneSymbol
+res_mososome_diff <- read.table("DESeq2/PooledMonosome.diffexp.tsv", header=TRUE, sep="\t")
+rownames(res_mososome_diff) <- res_mososome_diff$GeneSymbol
+
+res_DESeq2_anota2seq_monosome <- merge(res_mososome_diff, Monosome_anota2seq, by="row.names")[,-1]
+res_DESeq2_anota2seq_polysome <- merge(res_polysome_diff, Polysome_anota2seq, by="row.names")[,-1]
+
+# ## format numbers
+# res_DESeq2_anota2seq_monosome[, c(2:19, seq(20,36,2), seq(39,45,2) ,seq(48,54,2), seq(57,63,2), seq(66,72,2))] <- round(res_DESeq2_anota2seq_monosome[,c(2:19, seq(20,36,2), seq(39,45,2) ,seq(48,54,2), seq(57,63,2), seq(66,72,2))], digits = 3)
+# res_DESeq2_anota2seq_monosome[, c(seq(21,37,2), seq(40,46,2) ,seq(49,55,2), seq(58,64,2), seq(67,73,2))] <- lapply(res_DESeq2_anota2seq_monosome[, c(seq(21,37,2), seq(40,46,2) ,seq(49,55,2), seq(58,64,2), seq(67,73,2))], formatC, format="E", digits = 2)
+# 
+# res_DESeq2_anota2seq_polysome[, c(2:19, seq(20,36,2), seq(39,45,2) ,seq(48,54,2), seq(57,63,2), seq(66,72,2))] <- round(res_DESeq2_anota2seq_polysome[,c(2:19, seq(20,36,2), seq(39,45,2) ,seq(48,54,2), seq(57,63,2), seq(66,72,2))], digits = 3)
+# res_DESeq2_anota2seq_polysome[, c(seq(21,37,2), seq(40,46,2) ,seq(49,55,2), seq(58,64,2), seq(67,73,2))] <- lapply(res_DESeq2_anota2seq_polysome[, c(seq(21,37,2), seq(40,46,2) ,seq(49,55,2), seq(58,64,2), seq(67,73,2))], formatC, format="E", digits = 2)
+
+write.table(res_DESeq2_anota2seq_monosome, file="Monosome_DESeq2_anota2seq.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+write.table(res_DESeq2_anota2seq_polysome, file="Polysome_DESeq2_anota2seq.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+```
+
+
+

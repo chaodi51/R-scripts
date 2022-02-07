@@ -1,5 +1,5 @@
 ---
-title: "Differential expression (DESeq2) and GSEA nalysis for APDS and CTLA4 (pan-age)"
+title: "Differential expression (DESeq2) and GSEA nalysis for STAT3GOF and STAT3LOF"
 author: "Chao Di, dic@email.chop.edu"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output:
@@ -36,7 +36,6 @@ library(dplyr)
 library(tibble)
 library(data.table)
 library(org.Hs.eg.db)
-library(tidyverse)
 ```
 
 
@@ -64,21 +63,34 @@ norm_counts <- counts(dds, normalized=TRUE)
 # count transformation, log2 scale, either rlog or vst
 vsd <- vst(dds, blind=FALSE)
 cat("The data values after transformation:\n")
-head(assay(vsd))
+head(assay(vsd)[,1:6])
 
 ```
 
 * PCA plot
 The PCA plot shows the samples in the 2D plane spanned by their first two principal components. This type of plot is useful for visualizing the overall effect of experimental covariates and batch effects.
 ```{r message = FALSE, warning=FALSE}
-# APDS_CTLA4
-vsd_APDS_CTLA4 <- vsd[, vsd$APDS_CTLA4_group %in% c("Young", "Adults")]
-pcaData <- plotPCA(vsd_APDS_CTLA4, intgroup=c("disease","APDS_CTLA4_group","cell_type"), returnData=TRUE)
+# STAT3GOF
+vsd_STAT3GOF <- vsd[, vsd$STAT3GOF_group %in% c("Young", "Adults")]
+pcaData <- plotPCA(vsd_STAT3GOF, intgroup=c("disease","STAT3GOF_group","cell_type"), returnData=TRUE)
 percentVar <- round(100 * attr(pcaData, "percentVar"))
-ggplot(pcaData, aes(PC1, PC2, shape=APDS_CTLA4_group, color=disease)) +
+ggplot(pcaData, aes(PC1, PC2, shape=STAT3GOF_group, color=disease)) +
   geom_point(size =3, aes(fill=disease, alpha=cell_type))+ 
   geom_point(size =3) + 
   scale_shape_manual(values=c(22,24)) + 
+  scale_alpha_manual(values=c('Tnn'=0.05, 'Tn'=1)) + 
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed()
+
+# STAT3LOF
+vsd_STAT3LOF <- vsd[, vsd$STAT3LOF_group %in% c("Young","Older","Oldest")]
+pcaData <- plotPCA(vsd_STAT3LOF, intgroup=c("disease","STAT3LOF_group","cell_type"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, shape=STAT3LOF_group, color=disease)) +
+  geom_point(size =3, aes(fill=disease, alpha=cell_type))+ 
+  geom_point(size =3) + 
+  scale_shape_manual(values=c(22,23,24)) + 
   scale_alpha_manual(values=c('Tnn'=0.05, 'Tn'=1)) + 
   xlab(paste0("PC1: ", percentVar[1], "% variance")) +
   ylab(paste0("PC2: ", percentVar[2], "% variance")) +
@@ -90,10 +102,10 @@ ggplot(pcaData, aes(PC1, PC2, shape=APDS_CTLA4_group, color=disease)) +
 Heatmap showing the expressions of the most variable genes (top 35 here), optional to do clustering between samples. This gives us the information of which samples and which genes are close to each other.
 
 ```{r fig.height=9, fig.width=9, message=FALSE, include=TRUE}
-# APDS_CTLA4
-select <- head(order(-rowVars(assay(vsd_APDS_CTLA4))),50) # most variable genes
-pdata <- assay(vsd_APDS_CTLA4)[select,]
-df <- as.data.frame(colData(dds)[,c("disease","APDS_CTLA4_group","cell_type")]) %>% filter(APDS_CTLA4_group!="NA")
+# STAT3GOF
+select <- head(order(-rowVars(assay(vsd_STAT3GOF))),50) # most variable genes
+pdata <- assay(vsd_STAT3GOF)[select,]
+df <- as.data.frame(colData(dds)[,c("disease","STAT3GOF_group","cell_type")]) %>% filter(STAT3GOF_group!="NA")
 pheatmap(
   pdata,
   cluster_rows = TRUE,
@@ -101,6 +113,16 @@ pheatmap(
   cluster_cols = TRUE,
   annotation_col = df )
 
+# STAT3LOF
+select <- head(order(-rowVars(assay(vsd_STAT3LOF))),50) # most variable genes
+pdata <- assay(vsd_STAT3LOF)[select,]
+df <- as.data.frame(colData(dds)[,c("disease","STAT3LOF_group","cell_type")]) %>% filter(STAT3LOF_group!="NA")
+pheatmap(
+  pdata,
+  cluster_rows = TRUE,
+  show_rownames = TRUE,
+  cluster_cols = TRUE,
+  annotation_col = df )
 
 ```
 
@@ -109,57 +131,80 @@ pheatmap(
 Calculation of expression values (log2 scale), transformed by variance stabilizing transformations (VST).
 Setup contrast as disease vs HC in different age groups: Young, Adults, Older, Oldest etc (grouping variate for different diseases). Export tables with the standard DESeq2 result format including "baseMean log2FoldChange lfcSE stat pvalue padj" plus the "Log fold change shrinked" normalized readcounts )
 
-* APDS_CTLA4 
+* STAT3GOF 
 ```{r message=FALSE, warning = FALSE}
-dds_APDS_CTLA4 <- dds[,dds$APDS_CTLA4_group %in% c("Young", "Adults")]
-dds_APDS_CTLA4$disease <- factor(dds_APDS_CTLA4$disease, levels = c("HC","APDS","CTLA4"))
-dds_APDS_CTLA4$cell_type <- factor(dds_APDS_CTLA4$cell_type, levels = c("Tn","Tnn"))
+dds_STAT3GOF <- dds[,dds$STAT3GOF_group %in% c("Young", "Adults")]
+dds_STAT3GOF$disease <- factor(dds_STAT3GOF$disease, levels = c("HC","STAT3GOF"))
+dds_STAT3GOF$STAT3GOF_group <- factor(dds_STAT3GOF$STAT3GOF_group, levels=c("Young", "Adults"))
+dds_STAT3GOF$cell_type <- factor(dds_STAT3GOF$cell_type, levels = c("Tn","Tnn"))
 
-dds_APDS_CTLA4$group <- factor(paste0(dds_APDS_CTLA4$disease, dds_APDS_CTLA4$cell_type))
-design(dds_APDS_CTLA4) <- ~ group
-dds_APDS_CTLA4 <- DESeq(dds_APDS_CTLA4)
-resultsNames(dds_APDS_CTLA4)
+dds_STAT3GOF$group <- factor(paste0(dds_STAT3GOF$STAT3GOF_group, dds_STAT3GOF$disease, dds_STAT3GOF$cell_type))
+design(dds_STAT3GOF) <- ~ group
+dds_STAT3GOF <- DESeq(dds_STAT3GOF)
+resultsNames(dds_STAT3GOF)
 
-res_APDS_Tnn <- results(dds_APDS_CTLA4, contrast=c("group", "APDSTnn","HCTnn"))
-res_APDS_Tn <- results(dds_APDS_CTLA4, contrast=c("group", "APDSTn","HCTn"))
+res_STAT3GOF_Young_Tnn <- results(dds_STAT3GOF, contrast=c("group", "YoungSTAT3GOFTnn","YoungHCTnn"))
+# STAT3GOF_Young_Tn only has one sample, no statistics can be applied
+res_STAT3GOF_Adults_Tnn <- results(dds_STAT3GOF, contrast=c("group", "AdultsSTAT3GOFTnn","AdultsHCTnn"))
+res_STAT3GOF_Adults_Tn <- results(dds_STAT3GOF, contrast=c("group", "AdultsSTAT3GOFTn","AdultsHCTn"))
 
-res_CTLA4_Tnn <- results(dds_APDS_CTLA4, contrast=c("group", "CTLA4Tnn","HCTnn"))
-res_CTLA4_Tn <- results(dds_APDS_CTLA4, contrast=c("group", "CTLA4Tn","HCTn"))
+table(res_STAT3GOF_Young_Tnn$padj<0.1)
+data.frame(res_STAT3GOF_Young_Tnn[!is.na(res_STAT3GOF_Young_Tnn$padj) & res_STAT3GOF_Young_Tnn$padj<0.1,])
+res_STAT3GOF_Young_Tnn[rownames(res_STAT3GOF_Young_Tnn) %in% c("STAT3","TOX"),]
 
-table(res_APDS_Tnn$padj<0.1)
-res_APDS_Tnn[!is.na(res_APDS_Tnn$padj) & res_APDS_Tnn$padj<0.1,]
-res_APDS_Tnn[rownames(res_APDS_Tnn) %in% c("TOX"),]
-res_APDS_Tnn <- tibble::rownames_to_column(as.data.frame(res_APDS_Tnn), "gene_name")
-write.table(res_APDS_Tnn, file="./APDS_CTLA4/tables/res_APDS_Tnn.diffexp.tsv", sep="\t", quote=FALSE, row.names=FALSE)
-  
-table(res_APDS_Tn$padj<0.1)
-res_APDS_Tn[!is.na(res_APDS_Tn$padj) & res_APDS_Tn$padj<0.1,]
-res_APDS_Tn[rownames(res_APDS_Tn) %in% c("TOX"),]
-res_APDS_Tn <- tibble::rownames_to_column(as.data.frame(res_APDS_Tn), "gene_name")
-write.table(res_APDS_Tn, file="./APDS_CTLA4/tables/res_APDS_Tn.diffexp.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+table(res_STAT3GOF_Adults_Tnn$padj<0.1)
+data.frame(res_STAT3GOF_Adults_Tnn[!is.na(res_STAT3GOF_Adults_Tnn$padj) & res_STAT3GOF_Adults_Tnn$padj<0.1,])
+res_STAT3GOF_Adults_Tnn[rownames(res_STAT3GOF_Adults_Tnn) %in% c("STAT3","TOX"),]
 
+table(res_STAT3GOF_Adults_Tn$padj<0.1)
+data.frame(res_STAT3GOF_Adults_Tn[!is.na(res_STAT3GOF_Adults_Tn$padj) & res_STAT3GOF_Adults_Tn$padj<0.1,])
+res_STAT3GOF_Adults_Tn[rownames(res_STAT3GOF_Adults_Tn) %in% c("STAT3","TOX"),]
+```
 
-table(res_CTLA4_Tnn$padj<0.1)
-res_CTLA4_Tnn[!is.na(res_CTLA4_Tnn$padj) & res_CTLA4_Tnn$padj<0.1,]
-res_CTLA4_Tnn[rownames(res_CTLA4_Tnn) %in% c("TOX"),]
-res_CTLA4_Tnn <- tibble::rownames_to_column(as.data.frame(res_CTLA4_Tnn), "gene_name")
-write.table(res_CTLA4_Tnn, file="./APDS_CTLA4/tables/res_CTLA4_Tnn.diffexp.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+* STAT3LOF 
+```{r message=FALSE, warning = FALSE}
+dds_STAT3LOF <- dds[,dds$STAT3LOF_group %in% c("Young","Older","Oldest")]
+dds_STAT3LOF$disease <- factor(dds_STAT3LOF$disease, levels = c("HC","STAT3LOF"))
+dds_STAT3LOF$STAT3LOF_group <- factor(dds_STAT3LOF$STAT3LOF_group, levels =c("Young","Older","Oldest"))
+dds_STAT3LOF$cell_type <- factor(dds_STAT3LOF$cell_type, levels = c("Tn","Tnn"))
 
-table(res_CTLA4_Tn$padj<0.1)
-res_CTLA4_Tn[!is.na(res_CTLA4_Tn$padj) & res_CTLA4_Tn$padj<0.1,]
-res_CTLA4_Tn[rownames(res_CTLA4_Tn) %in% c("TOX"),]
-res_CTLA4_Tn <- tibble::rownames_to_column(as.data.frame(res_CTLA4_Tn), "gene_name")
-write.table(res_CTLA4_Tn, file="./APDS_CTLA4/tables/res_CTLA4_Tn.diffexp.tsv", sep="\t", quote=FALSE, row.names=FALSE)
+dds_STAT3LOF$group <- factor(paste0(dds_STAT3LOF$disease, dds_STAT3LOF$STAT3LOF_group, dds_STAT3LOF$cell_type))
+design(dds_STAT3LOF) <- ~ group
+dds_STAT3LOF <- DESeq(dds_STAT3LOF)
+resultsNames(dds_STAT3LOF)
 
+res_STAT3LOF_Young_Tnn <- results(dds_STAT3LOF, contrast=c("group", "STAT3LOFYoungTnn","HCYoungTnn"))
+res_STAT3LOF_Young_Tn <- results(dds_STAT3LOF, contrast=c("group", "STAT3LOFYoungTn","HCYoungTn"))
+
+res_STAT3LOF_Older_Tnn <- results(dds_STAT3LOF, contrast=c("group", "STAT3LOFOlderTnn","HCOlderTnn"))
+res_STAT3LOF_Older_Tn <- results(dds_STAT3LOF, contrast=c("group", "STAT3LOFOlderTn","HCOlderTn"))
+
+# STAT3LOF_Oldest only has one Tn and one Tnn sample, no statistics can be applied
+
+table(res_STAT3LOF_Young_Tnn$padj<0.1)
+res_STAT3LOF_Young_Tnn[!is.na(res_STAT3LOF_Young_Tnn$padj) & res_STAT3LOF_Young_Tnn$padj<0.1,]
+res_STAT3LOF_Young_Tnn[rownames(res_STAT3LOF_Young_Tnn) %in% c("STAT3","TOX"),]
+
+table(res_STAT3LOF_Young_Tn$padj<0.1)
+res_STAT3LOF_Young_Tn[!is.na(res_STAT3LOF_Young_Tn$padj) & res_STAT3LOF_Young_Tn$padj<0.1,]
+res_STAT3LOF_Young_Tn[rownames(res_STAT3LOF_Young_Tn) %in% c("STAT3","TOX"),]
+
+table(res_STAT3LOF_Older_Tnn$padj<0.1)
+res_STAT3LOF_Older_Tnn[!is.na(res_STAT3LOF_Older_Tnn$padj) & res_STAT3LOF_Older_Tnn$padj<0.1,]
+res_STAT3LOF_Older_Tnn[rownames(res_STAT3LOF_Older_Tnn) %in% c("STAT3","TOX"),]
+
+table(res_STAT3LOF_Older_Tn$padj<0.1)
+res_STAT3LOF_Older_Tn[!is.na(res_STAT3LOF_Older_Tn$padj) & res_STAT3LOF_Older_Tn$padj<0.1,]
+res_STAT3LOF_Older_Tn[rownames(res_STAT3LOF_Older_Tn) %in% c("STAT3","TOX"),]
 ```
 
 
 ### Volcano plots {-}
 ```{r message=FALSE, warning = FALSE, fig.height=8, fig.width=7, fig.show="hold"}
-for (each in c("APDS_Tnn", "APDS_Tn", "CTLA4_Tnn", "CTLA4_Tn")){
-  comp <- sub("_"," CD8", each)
+for (each in c("STAT3GOF_Young_Tnn", "STAT3GOF_Adults_Tnn", "STAT3GOF_Adults_Tn", "STAT3LOF_Young_Tnn", "STAT3LOF_Young_Tn", "STAT3LOF_Older_Tnn", "STAT3LOF_Older_Tn")){
+  comp <- paste0(each, "_disease_vs_HC") 
   res = get(paste0("res_",each))
-  top10 = res[order(res$padj),][1:20,]
+  top10 = res[order(res$padj),][1:10,]
   
   # only label padj<0.1 as significant
 keyvals <- ifelse(
@@ -195,9 +240,10 @@ names(keyvals)[keyvals == 'blue'] <- 'Non-significant'
 ```{r include=FALSE, echo=FALSE, message=FALSE, warning = FALSE}
 # create a function for GSEA and plot
 gseafunc <- function(gmtfile, pval_cutoff, gene_sets){
-  for (each in c("APDS_Tnn", "APDS_Tn", "CTLA4_Tnn", "CTLA4_Tn")){
+    for (each in c("STAT3GOF_Young_Tnn", "STAT3GOF_Adults_Tnn", "STAT3GOF_Adults_Tn", "STAT3LOF_Young_Tnn",
+                   "STAT3LOF_Young_Tn", "STAT3LOF_Older_Tnn", "STAT3LOF_Older_Tn")){
       # print comparison
-      comp <- sub("_"," CD8", each)
+      comp <- sub("Tn","CD8Tn", sub("_"," ", each))
       print(comp)
       res = get(paste0("res_",each))
       res <- res[order(res$stat,decreasing = T),]
@@ -225,7 +271,7 @@ gseafunc <- function(gmtfile, pval_cutoff, gene_sets){
       # plotGseaTable(gmtfile[mainPathways], ranked_genes, fgseaRes, gseaParam = 0.5)
         
       # output the table
-      fwrite(fgseaRes_filtered, file=paste0("./APDS_CTLA4/GSEA/enriched_genesets_", gene_sets,"_",comp,".tsv"), sep="\t", sep2=c("",",",""))
+      fwrite(fgseaRes_filtered, file=paste0("./STAT3/GSEA/enriched_genesets_", gene_sets,"_",comp,".tsv"), sep="\t", sep2=c("",",",""))
       
       p <- ggplot(fgseaRes_filtered, aes(reorder(pathway, NES), NES, color=padj)) +
            geom_point(aes(size=size)) +
@@ -270,9 +316,10 @@ exhaustion_down = read.table("./geneSets/ESG_DN_ATAC.grp.txt",header=F)
 # gmtfile = list(ESG=c(as.vector(exhaustion_up[[1]]), as.vector(exhaustion_down[[1]])))
 gmtfile = list(ESG_UP=as.vector(exhaustion_up[[1]]), ESG_DN=as.vector(exhaustion_down[[1]]))
 
-  for (each in c("APDS_Tnn", "APDS_Tn", "CTLA4_Tnn", "CTLA4_Tn")){
+for (each in c("STAT3GOF_Young_Tnn", "STAT3GOF_Adults_Tnn", "STAT3GOF_Adults_Tn", "STAT3LOF_Young_Tnn", "STAT3LOF_Young_Tn", "STAT3LOF_Older_Tnn", "STAT3LOF_Older_Tn")){
       # print comparison
-      comp <- sub("_"," CD8", each)
+      comp <- sub("Tn","CD8Tn", sub("_"," ", each))
+
       print(comp)
       res = get(paste0("res_",each))
       res <- res[order(res$stat,decreasing = T),]
@@ -288,75 +335,16 @@ gmtfile = list(ESG_UP=as.vector(exhaustion_up[[1]]), ESG_DN=as.vector(exhaustion
       print(fgseaRes)
       
       # output the table
-      fwrite(fgseaRes, file=paste0("./APDS_CTLA4/GSEA/enriched_genesets_Exhaustion_genesets","_",comp,".tsv"), sep="\t", sep2=c("",",",""))
+      fwrite(fgseaRes, file=paste0("./STAT3/GSEA/enriched_genesets_Exhaustion_genesets","_",comp,".tsv"), sep="\t", sep2=c("",",",""))
       
       # enrichment plot
-      # pdf(paste0("./APDS_CTLA4/figures/GSEA_Exhaustion_genesets_", comp,".pdf"), 6, 4)
+      # pdf(paste0("./STAT3/figures/GSEA_Exhaustion_genesets_", comp,".pdf"), 6, 4)
       Up_title = paste0(comp,' (padj = ', formatC(fgseaRes[fgseaRes$pathway=="ESG_UP",]$pval, format="e", digits = 2),") ESG_UP")
-      print(plotEnrichment(gmtfile[["ESG_UP"]], ranked_genes) + labs(title=Up_title) + theme(plot.title = element_text(size=10)))
-      Down_title = paste0(comp,' (padj = ', formatC(fgseaRes[fgseaRes$pathway=="ESG_DN",]$pval, format="e", digits =2),") ESG_DN")
+      print(plotEnrichment(gmtfile[["ESG_UP"]], ranked_genes) + labs(title=Up_title) + theme(plot.title = element_text(size=10)))      
+      Down_title = paste0(comp,' (padj = ', formatC(fgseaRes[fgseaRes$pathway=="ESG_DN",]$pval, format="e", digits = 2),") ESG_DN")
       print(plotEnrichment(gmtfile[["ESG_DN"]], ranked_genes) + labs(title=Down_title) + theme(plot.title = element_text(size=10)))
-      
       # dev.off()
       
 }
 
 ```
-
-### Stats of reads count on genes {-}
-```{r message=FALSE, warning = FALSE, fig.height=18, fig.width=15, fig.show="hold"}
-cts_sum = data.frame(matrix(0, ncol = ncol(cts), nrow = 4))
-for (i in 1:ncol(cts)){
-  c1 = sum(cts[,i] == 0)
-  c2 = sum(cts[,i] > 0 & cts[,i] <= 10)
-  c3 = sum(cts[,i] > 10 & cts[,i]<= 50)
-  c4 = sum(cts[,i] > 50)
-  cts_sum[,i] = c(c1,c2,c3,c4)
-}
-colnames(cts_sum) <- colnames(cts)
-cts_sum$category <- c("0", "0-10", "10-50", ">50")
-# change to long format
-mydata <- gather(cts_sum, key="sample", value="gene_numbers", -category, factor_key=TRUE)
-mydata$category <- factor(mydata$category, levels=c("0", "0-10", "10-50", ">50"))
-  
-pdf("gene_reads_count_stats_all_samples.pdf",18,16)
-ggplot(data=mydata, aes(x=category, y=gene_numbers)) +
-  geom_bar(stat="identity") +
-  facet_wrap(~sample, scales="free_x") +
-  guides(fill = guide_legend(reverse = TRUE)) +
-  coord_flip() +
-  theme_light()
-dev.off()    
-
-```
-* check ESG_UP genes
-```{r message=FALSE, warning = FALSE, fig.height=18, fig.width=15, fig.show="hold"}
-
-ESG_up_cts <- cts[rownames(cts) %in% exhaustion_up$V1,]
-cts_sum = data.frame(matrix(0, ncol = ncol(ESG_up_cts), nrow = 4))
-for (i in 1:ncol(ESG_up_cts)){
-  c1 = sum(ESG_up_cts[,i] == 0)
-  c2 = sum(ESG_up_cts[,i] > 0 & ESG_up_cts[,i] <= 10)
-  c3 = sum(ESG_up_cts[,i] > 10 & ESG_up_cts[,i]<= 50)
-  c4 = sum(ESG_up_cts[,i] > 50)
-  cts_sum[,i] = c(c1,c2,c3,c4)
-}
-colnames(cts_sum) <- colnames(ESG_up_cts)
-cts_sum$category <- c("0", "0-10", "10-50", ">50")
-# change to long format
-mydata <- gather(cts_sum, key="sample", value="gene_numbers", -category, factor_key=TRUE)
-mydata$category <- factor(mydata$category, levels=c("0", "0-10", "10-50", ">50"))
-  
-pdf("ESG_gene_reads_count_stats_all_samples.pdf",18,16)
-ggplot(data=mydata, aes(x=category, y=gene_numbers)) +
-  geom_bar(stat="identity") +
-  facet_wrap(~sample, scales="free_x") +
-  guides(fill = guide_legend(reverse = TRUE)) +
-  coord_flip() +
-  theme_light()
-dev.off()   
-
-```
-
-
-

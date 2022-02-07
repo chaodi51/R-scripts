@@ -1,0 +1,204 @@
+---
+title: "Functional analysis for polysome RNA-seq DESeq2 results"
+author: "Chao Di, dic@email.chop.edu"
+output:
+  html_document:
+    number_sections: false
+    code_folding: show
+---
+## Abstract {-}
+This project is for dissecting the transcriptome changes between nutrient deprivations and normal primary mouse (C57B6) T cells. The methods used here for differential gene expression analysis is `DESeq2`. This script is for functional analysis for results from `DESeq2`.
+
+```{r setup, include=FALSE}
+# replace with path where you want the results be
+# knitr::opts_knit$set(root.dir="/Users/dic/Documents/Will Bailis lab/Polysome_profiling/DESeq2")
+knitr::opts_chunk$set(message = FALSE, 
+                      warning = FALSE, 
+                      tidy = TRUE,
+                      fig.width = 10, 
+                      tidy.opts = list(width.cutoff = 95), 
+                      root.dir="/Users/dic/Documents/Will Bailis lab/Polysome_profiling/DESeq2")
+```
+
+```{r include=FALSE}
+# set home dir when test in console 
+library(fgsea)
+library(KEGGREST)
+library(gprofiler2)
+library(plotly)
+library(EnrichmentBrowser)
+library(dplyr)
+library(tibble)
+library(data.table)
+library(org.Mm.eg.db)
+library(msigdbr)
+```
+
+
+## Load work space from DESeq2 analysis
+```{r}
+load("DESeq2_work_space.RData")
+```
+
+
+## Gene set enrichment analyis
+```{r}
+# create a function for GSEA and plot
+gseafunc <- function(GSEA_pathways, pval_cutoff, gene_sets){
+  for (source in c("Input", "PooledMonosome", "PooledPolysome")){
+    for (each in c("NoArginine", "NoBCAA", "NoGlucose", "NoGlutamine", "NoMethionine")){
+      # print comparison
+      comp <- paste(source, each, "vs_control", sep="_") 
+      print(comp)
+      res <- get(paste("res", source, each, sep="_"))
+      res <- res[order(res$stat,decreasing = T),]
+      res$symbol = rownames(res)
+      ranked_genes <- res %>% as.data.frame() %>% dplyr::select(symbol, stat) %>% deframe()
+      fgseaRes <- fgsea(pathways = GSEA_pathways,
+                        stats = ranked_genes,
+                        minSize = 5,
+                        maxSize=600,
+                        eps=0)
+
+      # select most significant pathways to show in a table plot
+      # topPathwaysUp <- fgseaRes[ES > 0][head(order(pval), n=10), pathway]
+      # topPathwaysDown <- fgseaRes[ES < 0][head(order(pval), n=10), pathway]
+      # topPathways <- c(topPathwaysUp, rev(topPathwaysDown))
+      # plotGseaTable(GSEA_pathways[topPathways], ranked_genes, fgseaRes, gseaParam = 0.5)
+
+      # select independent pathways, and filter by pval_cutoff
+      collapsedPathways <- collapsePathways(fgseaRes[order(pval)][padj < pval_cutoff], GSEA_pathways, ranked_genes)
+      fgseaRes_filtered <- fgseaRes[pathway %in% collapsedPathways$mainPathways][order(-NES), ]
+      print(head(fgseaRes_filtered))
+
+      # plot in fgsea table style
+      # mainPathways <- fgseaRes[pathway %in% collapsedPathways$mainPathways][order(-NES), pathway]
+      # plotGseaTable(GSEA_pathways[mainPathways], ranked_genes, fgseaRes, gseaParam = 0.5)
+
+      # output the table
+      fwrite(fgseaRes_filtered, file=paste0("./GSEA/enriched_genesets_", gene_sets,"_",comp,".tsv"), sep="\t", sep2=c("",",",""))
+
+      p <- ggplot(fgseaRes_filtered, aes(reorder(pathway, NES), NES, color=padj)) +
+           geom_point(aes(size=size)) +
+           scale_color_gradient(low="red", high="blue") +
+           coord_flip() +
+           labs(x="Pathway", y="Normalized Enrichment Score", title= comp, color="adjust.p", size="Count") +
+           theme_minimal()
+      print(p)
+    }
+  }
+}
+```
+
+<!-- ### Hallmark gene sets -->
+<!-- # ```{r} -->
+<!-- # # load msigsb genesets -->
+<!-- # h_gene_sets = msigdbr(species = "mouse", category = "H") -->
+<!-- # msigdbr_list = split(x = h_gene_sets$gene_symbol, f = h_gene_sets$gs_name) -->
+<!-- #  -->
+<!-- # gseafunc(GSEA_pathways=msigdbr_list, pval_cutoff=0.1, gene_sets="GSEA-Hallmarks") -->
+<!-- # ``` -->
+
+### C2.Curated gene sets - KEGG
+```{r}
+# load msigdb genesets
+cgp_gene_sets = msigdbr(species = "mouse", category = "C2", subcategory = "KEGG")
+msigdbr_list = split(x = cgp_gene_sets$gene_symbol, f = cgp_gene_sets$gs_name)
+
+gseafunc(GSEA_pathways=msigdbr_list, pval_cutoff=0.1, gene_sets="GSEA-C2_KEGG")
+```
+
+## Functional enrichment analysis for the differential expressed genes
+* Functional enrichment analysis by `gprofilter2`(here) or `clusterProfiler`
+The abbreviation of the datasource for the term. Currently, the possible datasources are
+GO:MF - Gene Ontology Molecular Function branch  
+GO:BP - Gene Ontology Biological Process branch  
+GO:CC - Gene Ontology Cellular Component branch  
+KEGG - KEGG pathways  
+REAC - Reactome pathways  
+WP - WikiPathways  
+TF - Transfac transcription factor binding site predictions  
+MIRNA - mirTarBase miRNA targets  
+HPA - Human Protein Atlas expression data  
+CORUM - Manually annotated protein complexes from mammalian organisms.  
+HP - Human Phenotype Ontology, a standardized vocabulary of phenotypic abnormalities encountered in human disease.  
+
+```{r}
+gprofilter_func <- function(genelist, pval_cutoff, dataName){
+    genes <- list(rownames(genelist))
+    names(genes) <- dataName
+    gostres <- gost(query = genes,
+                    organism = "mmusculus", ordered_query = FALSE,
+                    multi_query = FALSE, significant = TRUE, exclude_iea = FALSE,
+                    measure_underrepresentation = FALSE, evcodes = TRUE,
+                    user_threshold = pval_cutoff, correction_method = "g_SCS",
+                    domain_scope = "annotated", custom_bg = NULL,
+                    numeric_ns = "", sources = NULL, as_short_link = FALSE)
+    
+    if(!is.null(gostres)) {
+        gostres$result <-  gostres$result %>% filter(term_size >=3 & term_size<=600)}
+
+    gostres_select <- gostres$result[,c("source", "term_id", "term_name", "term_size", "intersection_size","p_value","intersection")] 
+    write.table(gostres_select, file=paste0("gprofilter2/", dataName, "_gprofilter2_fulltable.tsv"), sep="\t", row.names = FALSE, col.names=TRUE, quote=FALSE)
+    
+    
+    # return a short-link with the setting parameters to be analyzed on the web tool g:Profilter
+    gostres_link <- gost(query = rownames(genelist),
+                    organism = "mmusculus", ordered_query = FALSE,
+                    multi_query = FALSE, significant = TRUE, exclude_iea = FALSE,
+                    measure_underrepresentation = FALSE, evcodes = TRUE,
+                    user_threshold = pval_cutoff, correction_method = "g_SCS",
+                    domain_scope = "annotated", custom_bg = NULL,
+                    numeric_ns = "", sources = NULL, as_short_link = TRUE)
+    cat("Analyze the data with settings on g:Profilter:", gostres_link, "\n")
+    
+    
+    # cat("This is an interactive Manhattan-like-plot:\n")
+    if(!is.null(gostres)) {gostplot(gostres, capped = TRUE, interactive = TRUE)}
+
+    # cat("Select most significant terms shown in the table: \n")
+    # p <- gostplot(gostres, capped = TRUE, interactive = TRUE)
+    # pp <- publish_gostplot(p, highlight_terms = NULL,
+    #                         height = NA, width = NA, filename = NULL)
+    # 
+    # publish_gosttable(gostres, use_colors = TRUE, 
+    #                     show_columns = c("source", "term_name", "term_size", "intersection_size"),
+    #                     filename = NULL)
+    ## save the full table
+    # gotable <- publish_gosttable(gostres, highlight_terms = gostres$result[gostres$result$p_value<1e-8,]$term_id,
+    # use_colors = TRUE, show_columns = c("source", "term_name", "term_size", "intersection_size"), filename = "GOres_table.pdf")
+}
+```
+
+* Loop for each method and each nutrient condition (FC>=1.5 and padj<=0.05 as cutoff for DE)
+```{r, plotly=TRUE}
+all_p = list()
+n=0
+for (source in c("Input", "PooledMonosome", "PooledPolysome")){
+    # for (each in c("NoArginine")){
+    for (each in c("NoArginine", "NoBCAA", "NoGlucose", "NoGlutamine", "NoMethionine")){
+      # print comparison
+      comp <- paste(source, each, "vs_control", sep="_")
+      print(comp)
+      res <- get(paste("res", source, each, sep="_"))
+
+      up_gene = res[which(res$padj <= 0.05 & res$log2FoldChange >= log2(1.5)),]
+      down_gene = res[which(res$padj <= 0.05 & res$log2FoldChange <= -log2(1.5)),]
+
+      cat(paste0("GO enrichment for Up genes ", length(up_gene$padj),"\n"))
+      n = n + 1
+      all_p[[n]] <- gprofilter_func(genelist=up_gene, pval_cutoff=0.05, dataName=paste0(comp,"_Up"))
+      cat(paste0("GO enrichment for DN genes ", length(down_gene$padj),"\n"))
+      n = n + 1
+      all_p[[n]] <- gprofilter_func(genelist=down_gene, pval_cutoff=0.05, dataName=paste0(comp,"_Down"))
+    }
+}
+
+htmltools::tagList(all_p)
+```
+
+
+
+
+
+

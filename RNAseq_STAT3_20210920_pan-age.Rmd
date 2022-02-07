@@ -1,5 +1,5 @@
 ---
-title: "Differential expression (DESeq2) and GSEA nalysis for STAT3GOF and STAT3LOF (pan-age)"
+title: "Differential expression (DESeq2) and GSEA nalysis for STAT3 pan-age RNA-seq"
 author: "Chao Di, dic@email.chop.edu"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output:
@@ -12,14 +12,16 @@ output:
 ## Abstract {-}
 This project is for dissecting the transcriptome changes between patients with single gene mutations (STAT3 and STAT1) and HC. The methods used here for differential gene expression analysis is DESeq2.
 
-```{r setup, include=FALSE, echo = FALSE, cache = FALSE, warning=FALSE}
+```{r setup, include=FALSE}
 # replace with path where you want the results be
 knitr::opts_knit$set(root.dir="/Users/dic/Documents/Sarah Henrickson lab/20210920_Peyton_SHenrickson_RNAseq/")
+knitr::opts_chunk$set(message = FALSE, warning = FALSE,
+                      root.dir="/Users/dic/Documents/Sarah Henrickson lab/20210920_Peyton_SHenrickson_RNAseq/")
 ```
 
-```{r include=FALSE,echo=FALSE,message = FALSE}
+```{r include=FALSE}
 # set home dir when test in console 
-setwd("/Users/dic/Documents/Sarah Henrickson lab/20210920_Peyton_SHenrickson_RNAseq/")
+setwd("/Users/dic/Documents/Sarah Henrickson lab/20210920_Peyton_SHenrickson_RNAseq")
 library(DESeq2)
 library(apeglm)
 library(ashr)
@@ -43,7 +45,7 @@ library(org.Hs.eg.db)
 * Load read counts and do data transformation
 Supply with raw read counts table "all_readCount.tsv" calculated from STAR/HT-seq, and sample info "sample_contrast.tsv", do value transformation and normalization (variance stabilizing transformations (VST)) in DESeq2.
 
-```{r message=FALSE, warning=FALSE}
+```{r}
 cts <- read.table("all_readCount.tsv", header=TRUE, row.names="gene", check.names=FALSE)
 colnames(cts) <- sub("_S.+","",colnames(cts))
 coldata <- read.table("sample_table.tsv", header=TRUE, row.names="sample",sep="\t", check.names=FALSE)
@@ -101,28 +103,36 @@ ggplot(pcaData, aes(PC1, PC2, shape=STAT3LOF_group, color=disease)) +
 * Heatmap for expression matrix
 Heatmap showing the expressions of the most variable genes (top 35 here), optional to do clustering between samples. This gives us the information of which samples and which genes are close to each other.
 
-```{r fig.height=9, fig.width=9, message=FALSE, include=TRUE}
+```{r fig.height=10, fig.width=9, message=FALSE, include=TRUE}
 # STAT3GOF
-select <- head(order(-rowVars(assay(vsd_STAT3GOF))),50) # most variable genes
-pdata <- assay(vsd_STAT3GOF)[select,]
-df <- as.data.frame(colData(dds)[,c("disease","STAT3GOF_group","cell_type")]) %>% filter(STAT3GOF_group!="NA")
+# only show Tn samples per Jose's request
+df <- as.data.frame(colData(dds)[,c("disease","STAT3GOF_group","cell_type")]) %>% filter(STAT3GOF_group!="NA" & cell_type=="Tn") %>% arrange(disease)
+
+vsd_STAT3GOF_Tn <- as.data.frame(assay(vsd_STAT3GOF))[,rownames(df)]
+
+top100 <- head(order(-rowVars(vsd_STAT3GOF_Tn)),100) # most variable genes
+pdata <- vsd_STAT3GOF_Tn[top100,]
+
 pheatmap(
   pdata,
   cluster_rows = TRUE,
   show_rownames = TRUE,
-  cluster_cols = TRUE,
-  annotation_col = df )
+  cluster_cols = FALSE,
+  annotation_col = df,
+  fontsize_row = 5)
 
 # STAT3LOF
-select <- head(order(-rowVars(assay(vsd_STAT3LOF))),50) # most variable genes
-pdata <- assay(vsd_STAT3LOF)[select,]
 df <- as.data.frame(colData(dds)[,c("disease","STAT3LOF_group","cell_type")]) %>% filter(STAT3LOF_group!="NA")
+
+top100 <- head(order(-rowVars(assay(vsd_STAT3LOF))),100) # most variable genes
+pdata <- assay(vsd_STAT3LOF)[top100,]
 pheatmap(
   pdata,
   cluster_rows = TRUE,
   show_rownames = TRUE,
   cluster_cols = TRUE,
-  annotation_col = df )
+  annotation_col = df,
+  fontsize_row = 5)
 
 ```
 
@@ -183,12 +193,15 @@ res_STAT3LOF_Tn[rownames(res_STAT3LOF_Tn) %in% c("STAT3","TOX"),]
 
 
 ### Volcano plots {-}
+Top10 differential genes and 'PDCD1', 'TOX', 'LAG3','TIGIT','PRDM1' are labeled on the plots.
+PDCD1 (PD-1) is not expressed in any of the sample.
 ```{r message=FALSE, warning = FALSE, fig.height=8, fig.width=7, fig.show="hold"}
 for (each in c("STAT3GOF_Tnn", "STAT3GOF_Tn", "STAT3LOF_Tnn", "STAT3LOF_Tn")){
   comp <- paste0(each, "_disease_vs_HC") 
   res = get(paste0("res_",each))
   top10 = res[order(res$padj),][1:10,]
-  
+
+  selected_genes = c('PDCD1', 'TOX', 'LAG3','TIGIT','PRDM1')  
   # only label padj<0.1 as significant
 keyvals <- ifelse(
      rownames(res) %in% rownames(res[!is.na(res$padj) & res$padj<0.1,]), 'red', 'blue')
@@ -198,14 +211,15 @@ names(keyvals)[keyvals == 'blue'] <- 'Non-significant'
   volcano <- EnhancedVolcano(
       res,
       lab = rownames(res),
-      selectLab = rownames(top10),
+      selectLab = c(selected_genes, rownames(top10)),
       x = 'log2FoldChange',
       y = 'pvalue',
-      ylim = c(0, max(-log10(res$pvalue) + 1)),
+      ylim = c(0, -log10(min(res$pvalue[res$pvalue>0])) + 1),
       title = comp,
       subtitle = "",
-      pCutoff = 0.05,
-      FCcutoff = 2,
+      pCutoff = 0.05, # cutoff line for 'pCutoffCol'
+      pCutoffCol = "pvalue",
+      FCcutoff = 1,
       pointSize = 2,
       labSize = 4,
       colCustom = keyvals,
@@ -298,7 +312,8 @@ exhaustion_down = read.table("./geneSets/ESG_DN_ATAC.grp.txt",header=F)
 # gmtfile = list(ESG=c(as.vector(exhaustion_up[[1]]), as.vector(exhaustion_down[[1]])))
 gmtfile = list(ESG_UP=as.vector(exhaustion_up[[1]]), ESG_DN=as.vector(exhaustion_down[[1]]))
 
-for (each in c("STAT3GOF_Tnn", "STAT3GOF_Tn", "STAT3LOF_Tnn", "STAT3LOF_Tn")){
+for (each in c("STAT3GOF_Tnn")){
+#for (each in c("STAT3GOF_Tnn", "STAT3GOF_Tn", "STAT3LOF_Tnn", "STAT3LOF_Tn")){
       # print comparison
       comp <- sub("_"," CD8", each)
       print(comp)

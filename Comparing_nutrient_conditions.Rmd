@@ -1,0 +1,342 @@
+---
+title: "Comparing nutrient conditions by Venn diagrams"
+author: "Chao Di, dic@chop.edu"
+output: 
+  html_document:
+    number_sections: false
+    code_folding: show
+---
+
+## Abstract {-}
+Comparing DE genes from `DESeq2` and `Anota2seq`.
+
+```{r setup, include = FALSE}
+# replace with path where you want the results be
+knitr::opts_knit$set(root.dir="/Users/dic/Documents/Will Bailis lab/Polysome_profiling/DESeq2")
+knitr::opts_chunk$set(message = FALSE, 
+                      warning = FALSE, 
+                      tidy = TRUE,
+                      fig.width = 10, 
+                      tidy.opts = list(width.cutoff = 95), 
+                      root.dir="/Users/dic/Documents/Will Bailis lab/Polysome_profiling/DESeq2")
+```
+
+```{r include = FALSE}
+library(VennDiagram)
+library(tidyverse)
+```
+
+## Load work space from DESeq2 analysis
+```{r}
+load("DESeq2_work_space.RData")
+```
+## Make Venn diagrams {.tabset}
+Function to draw five-way venn diagram    
+```{r}
+draw_venn <- function(lt1, lt2, lt3, lt4, lt5, dataName, direction){
+    
+    dir.create(file.path("venn", dataName, direction), recursive = TRUE, showWarnings = FALSE)
+    a = lt1[[1]]; b = lt2[[1]]; c = lt3[[1]]; d = lt4[[1]]; e = lt5[[1]]
+  
+    ab <- Reduce(intersect,list(a, b))
+    ac <- Reduce(intersect,list(a, c))
+    ad <- Reduce(intersect,list(a, d))
+    ae <- Reduce(intersect,list(a, e))
+    bc <- Reduce(intersect,list(b, c))
+    bd <- Reduce(intersect,list(b, d))
+    be <- Reduce(intersect,list(b, e))
+    cd <- Reduce(intersect,list(c, d))
+    ce <- Reduce(intersect,list(c, e))
+    de <- Reduce(intersect,list(d, e))
+    abc <- Reduce(intersect, list(a, b, c))
+    abd <- Reduce(intersect, list(a, b, d))
+    abe <- Reduce(intersect, list(a, b, e))
+    acd <- Reduce(intersect, list(a, c, d))
+    ace <- Reduce(intersect, list(a, c, e))
+    ade <- Reduce(intersect, list(a, d, e))
+    bcd <- Reduce(intersect, list(b, c, d))
+    bce <- Reduce(intersect, list(b, c, e))
+    bde <- Reduce(intersect, list(b, d, e))
+    cde <- Reduce(intersect, list(c, d, e))
+    abcd <- Reduce(intersect, list(a, b, c, d))
+    abce <- Reduce(intersect, list(a, b, c, e))
+    abde <- Reduce(intersect, list(a, b, d, e))
+    acde <- Reduce(intersect, list(a, c, d, e))
+    bcde <- Reduce(intersect, list(b, c, d, e))
+    abcde <- Reduce(intersect, list(a, b, c, d, e))
+    
+    write.table(ab, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt2), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(ac, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt3), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(ad, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt4), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(ae, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(bc, file=paste0("venn/", dataName, "/", direction, "/", names(lt2), names(lt3), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(bd, file=paste0("venn/", dataName, "/", direction, "/", names(lt2), names(lt4), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(be, file=paste0("venn/", dataName, "/", direction, "/", names(lt2), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(cd, file=paste0("venn/", dataName, "/", direction, "/", names(lt3), names(lt4), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(ce, file=paste0("venn/", dataName, "/", direction, "/", names(lt3), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(de, file=paste0("venn/", dataName, "/", direction, "/", names(lt4), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(abc, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt2), names(lt3), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(abd, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt2), names(lt4), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(abe, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt2), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(acd, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt3), names(lt4), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(ace, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt3), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(ade, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt4), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(bcd, file=paste0("venn/", dataName, "/", direction, "/", names(lt2), names(lt3), names(lt4), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(bce, file=paste0("venn/", dataName, "/", direction, "/", names(lt2), names(lt3), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(bde, file=paste0("venn/", dataName, "/", direction, "/", names(lt2), names(lt4), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(cde, file=paste0("venn/", dataName, "/", direction, "/", names(lt3), names(lt4), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(abcd, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt2), names(lt3), names(lt4), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(abce, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt2), names(lt3), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(abde, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt2), names(lt4), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(acde, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt3), names(lt4), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(bcde, file=paste0("venn/", dataName, "/", direction, "/", names(lt2), names(lt3), names(lt4), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    write.table(abcde, file=paste0("venn/", dataName, "/", direction, "/", names(lt1), names(lt2), names(lt3), names(lt4), names(lt5), ".tsv"), quote=F, col.names = "GeneSymbol", row.names = F)
+    
+    grid.newpage()
+    venn.plot <- draw.quintuple.venn(
+        	area1 = length(a),
+        	area2 = length(b),
+        	area3 = length(c),
+        	area4 = length(d),
+        	area5 = length(e),
+        	n12 = length(ab),
+        	n13 = length(ac),
+        	n14 = length(ad),
+        	n15 = length(ae),
+        	n23 = length(bc),
+        	n24 = length(bd),
+        	n25 = length(be),
+        	n34 = length(cd),
+        	n35 = length(ce),
+        	n45 = length(de),
+        	n123 = length(abc),
+        	n124 = length(abd),
+        	n125 = length(abe),
+        	n134 = length(acd),
+        	n135 = length(ace),
+        	n145 = length(ade),
+        	n234 = length(bcd),
+        	n235 = length(bce),
+        	n245 = length(bde),
+        	n345 = length(cde),
+        	n1234 = length(abcd),
+        	n1235 = length(abce),
+        	n1245 = length(abde),
+        	n1345 = length(acde),
+        	n2345 = length(bcde),
+        	n12345 = length(abcde),
+        	category = c("NoArginine", "NoBCAA", "NoGlucose", "NoGlutamine", "NoMethionine"),
+        	fill = c("dodgerblue", "goldenrod1", "darkorange1", "seagreen3", "orchid3"),
+        	cat.col = c("dodgerblue", "goldenrod1", "darkorange1", "seagreen3", "orchid3"),
+        	cat.cex = 1.5,
+        	margin = 0.15,
+        	cex = c(1.5, 1.5, 1.5, 1.5, 1.5, 1, 0.8, 1, 0.8, 1, 0.8, 1, 0.8, 1, 0.8, 
+        	1, 0.7, 1, 0.7, 1, 0.7, 1, 0.7, 1, 0.7, 1, 1, 1, 1, 1, 1.5),
+        	ind = FALSE)
+    
+    grid.draw(venn.plot)
+}
+```
+
+Function to get DEs for different cutoffs  
+```{r}
+
+getDEs <- function(pcut, lg2FC, dataName) {
+    cat(paste0("Set significance cutff: padj ", pcut, " and log2FC ", lg2FC, "\n\n"))
+    res_NoArginine = get(paste("res", dataName, "NoArginine", sep="_"))
+    res_NoBCAA = get(paste("res", dataName, "NoBCAA", sep="_"))
+    res_NoGlucose = get(paste("res", dataName, "NoGlucose", sep="_"))
+    res_NoGlutamine = get(paste("res", dataName, "NoGlutamine", sep="_"))
+    res_NoMethionine = get(paste("res", dataName, "NoMethionine", sep="_"))
+    
+    # NoArginine
+    up_NoArginine = res_NoArginine[which(res_NoArginine$padj <= pcut & res_NoArginine$log2FoldChange >= lg2FC),]
+    down_NoArginine = res_NoArginine[which(res_NoArginine$padj <= pcut & res_NoArginine$log2FoldChange <= -lg2FC),]
+    cat(paste0("NoArginine vs Control: # Up = ", length(up_NoArginine$padj),"  # Down = ", length(down_NoArginine$padj),"\n"))
+    
+    # NoBCAA
+    up_NoBCAA = res_NoBCAA[which(res_NoBCAA$padj <= pcut & res_NoBCAA$log2FoldChange >= lg2FC),]
+    down_NoBCAA = res_NoBCAA[which(res_NoBCAA$padj <= pcut & res_NoBCAA$log2FoldChange <= -lg2FC),]
+    cat(paste0("NoBCAA vs Control: # Up = ", length(up_NoBCAA$padj),"  # Down = ", length(down_NoBCAA$padj),"\n"))
+    
+    # NoGlucose
+    up_NoGlucose = res_NoGlucose[which(res_NoGlucose$padj <= pcut & res_NoGlucose$log2FoldChange >= lg2FC),]
+    down_NoGlucose = res_NoGlucose[which(res_NoGlucose$padj <= pcut & res_NoGlucose$log2FoldChange <= -lg2FC),]
+    cat(paste0("NoGlucose vs Control: # Up = ", length(up_NoGlucose$padj),"  # Down = ", length(down_NoGlucose$padj),"\n"))
+    
+    # NoGlutamine
+    up_NoGlutamine = res_NoGlutamine[which(res_NoGlutamine$padj <= pcut & res_NoGlutamine$log2FoldChange >= lg2FC),]
+    down_NoGlutamine = res_NoGlutamine[which(res_NoGlutamine$padj <= pcut & res_NoGlutamine$log2FoldChange <= -lg2FC),]
+    cat(paste0("NoGlutamine vs Control: # Up = ", length(up_NoGlutamine$padj),"  # Down = ", length(down_NoGlutamine$padj),"\n"))
+    
+    # NoMethionine
+    up_NoMethionine = res_NoMethionine[which(res_NoMethionine$padj <= pcut & res_NoMethionine$log2FoldChange >= lg2FC),]
+    down_NoMethionine = res_NoMethionine[which(res_NoMethionine$padj <= pcut & res_NoMethionine$log2FoldChange <= -lg2FC),]
+    cat(paste0("NoMethionine vs Control: # Up = ", length(up_NoMethionine$padj),"  # Down = ", length(down_NoMethionine$padj),"\n"))
+    
+    return(list(up_NoArginine, up_NoBCAA, up_NoGlucose, up_NoGlutamine, up_NoMethionine, down_NoArginine, down_NoBCAA, down_NoGlucose, down_NoGlutamine, down_NoMethionine))
+  
+}
+
+```
+
+### FC=2 {.tabset}
+#### Input RNA
+Get up/down gene lists  
+```{r}
+DE_list <- getDEs(0.05, 1, "Input")
+```
+
+Draw genes induced by No nutrient deprivation  
+```{r, fig.width=7, fig.height=7}
+lt1 <- list("up_NoArginine" = rownames(DE_list[[1]]))
+lt2 <- list("up_NoBCAA" = rownames(DE_list[[2]]))
+lt3 <- list("up_NoGlucose" = rownames(DE_list[[3]]))
+lt4 <- list("up_NoGlutamine" = rownames(DE_list[[4]]))
+lt5 <- list("up_NoMethionine" = rownames(DE_list[[5]]))
+draw_venn(lt1, lt2, lt3, lt4, lt5, "Input", "up_regulation")
+```
+
+Draw genes depressed by No nutrient deprivation  
+```{r, fig.width=7, fig.height=7}
+lt1 <- list("down_NoArginine" = rownames(DE_list[[6]]))
+lt2 <- list("down_NoBCAA" = rownames(DE_list[[7]]))
+lt3 <- list("down_NoGlucose" = rownames(DE_list[[8]]))
+lt4 <- list("down_NoGlutamine" = rownames(DE_list[[9]]))
+lt5 <- list("down_NoMethionine" = rownames(DE_list[[10]]))
+draw_venn(lt1, lt2, lt3, lt4, lt5, "Input", "down_regulation")
+```
+
+#### Monosome
+Get up/down gene lists  
+```{r}
+DE_list <- getDEs(0.05, 1, "PooledMonosome")
+```
+
+Draw genes induced by No nutrient deprivation  
+```{r, fig.width=7, fig.height=7}
+lt1 <- list("up_NoArginine" = rownames(DE_list[[1]]))
+lt2 <- list("up_NoBCAA" = rownames(DE_list[[2]]))
+lt3 <- list("up_NoGlucose" = rownames(DE_list[[3]]))
+lt4 <- list("up_NoGlutamine" = rownames(DE_list[[4]]))
+lt5 <- list("up_NoMethionine" = rownames(DE_list[[5]]))
+draw_venn(lt1, lt2, lt3, lt4, lt5, "PooledMonosome", "up_regulation")
+```
+
+Draw genes depressed by No nutrient deprivation  
+```{r, fig.width=7, fig.height=7}
+lt1 <- list("down_NoArginine" = rownames(DE_list[[6]]))
+lt2 <- list("down_NoBCAA" = rownames(DE_list[[7]]))
+lt3 <- list("down_NoGlucose" = rownames(DE_list[[8]]))
+lt4 <- list("down_NoGlutamine" = rownames(DE_list[[9]]))
+lt5 <- list("down_NoMethionine" = rownames(DE_list[[10]]))
+draw_venn(lt1, lt2, lt3, lt4, lt5, "PooledMonosome", "down_regulation")
+```
+
+
+#### Polysome
+Get up/down gene lists  
+```{r}
+DE_list <- getDEs(0.05, 1, "PooledPolysome")
+```
+
+Draw genes induced by No nutrient deprivation  
+```{r, fig.width=7, fig.height=7}
+lt1 <- list("up_NoArginine" = rownames(DE_list[[1]]))
+lt2 <- list("up_NoBCAA" = rownames(DE_list[[2]]))
+lt3 <- list("up_NoGlucose" = rownames(DE_list[[3]]))
+lt4 <- list("up_NoGlutamine" = rownames(DE_list[[4]]))
+lt5 <- list("up_NoMethionine" = rownames(DE_list[[5]]))
+draw_venn(lt1, lt2, lt3, lt4, lt5, "PooledPolysome", "up_regulation")
+```
+
+Draw genes depressed by No nutrient deprivation  
+```{r, fig.width=7, fig.height=7}
+lt1 <- list("down_NoArginine" = rownames(DE_list[[6]]))
+lt2 <- list("down_NoBCAA" = rownames(DE_list[[7]]))
+lt3 <- list("down_NoGlucose" = rownames(DE_list[[8]]))
+lt4 <- list("down_NoGlutamine" = rownames(DE_list[[9]]))
+lt5 <- list("down_NoMethionine" = rownames(DE_list[[10]]))
+draw_venn(lt1, lt2, lt3, lt4, lt5, "PooledPolysome", "down_regulation")
+```
+
+
+### FC=1.5 {.tabset}
+#### Input RNA
+Get up/down gene lists  
+```{r}
+DE_list <- getDEs(0.05, log2(1.5), "Input")
+```
+
+Draw genes induced by No nutrient deprivation  
+```{r, fig.width=7, fig.height=7}
+lt1 <- list("up_NoArginine" = rownames(DE_list[[1]]))
+lt2 <- list("up_NoBCAA" = rownames(DE_list[[2]]))
+lt3 <- list("up_NoGlucose" = rownames(DE_list[[3]]))
+lt4 <- list("up_NoGlutamine" = rownames(DE_list[[4]]))
+lt5 <- list("up_NoMethionine" = rownames(DE_list[[5]]))
+draw_venn(lt1, lt2, lt3, lt4, lt5, "Input", "up_regulation")
+```
+
+Draw genes depressed by No nutrient deprivation  
+```{r, fig.width=7, fig.height=7}
+lt1 <- list("down_NoArginine" = rownames(DE_list[[6]]))
+lt2 <- list("down_NoBCAA" = rownames(DE_list[[7]]))
+lt3 <- list("down_NoGlucose" = rownames(DE_list[[8]]))
+lt4 <- list("down_NoGlutamine" = rownames(DE_list[[9]]))
+lt5 <- list("down_NoMethionine" = rownames(DE_list[[10]]))
+draw_venn(lt1, lt2, lt3, lt4, lt5, "Input", "down_regulation")
+```
+
+#### Monosome
+Get up/down gene lists  
+```{r}
+DE_list <- getDEs(0.05, log2(1.5), "PooledMonosome")
+```
+
+Draw genes induced by No nutrient deprivation  
+```{r, fig.width=7, fig.height=7}
+lt1 <- list("up_NoArginine" = rownames(DE_list[[1]]))
+lt2 <- list("up_NoBCAA" = rownames(DE_list[[2]]))
+lt3 <- list("up_NoGlucose" = rownames(DE_list[[3]]))
+lt4 <- list("up_NoGlutamine" = rownames(DE_list[[4]]))
+lt5 <- list("up_NoMethionine" = rownames(DE_list[[5]]))
+draw_venn(lt1, lt2, lt3, lt4, lt5, "PooledMonosome", "up_regulation")
+```
+
+Draw genes depressed by No nutrient deprivation  
+```{r, fig.width=7, fig.height=7}
+lt1 <- list("down_NoArginine" = rownames(DE_list[[6]]))
+lt2 <- list("down_NoBCAA" = rownames(DE_list[[7]]))
+lt3 <- list("down_NoGlucose" = rownames(DE_list[[8]]))
+lt4 <- list("down_NoGlutamine" = rownames(DE_list[[9]]))
+lt5 <- list("down_NoMethionine" = rownames(DE_list[[10]]))
+draw_venn(lt1, lt2, lt3, lt4, lt5, "PooledMonosome", "down_regulation")
+```
+
+
+#### Polysome
+Get up/down gene lists  
+```{r}
+DE_list <- getDEs(0.05, log2(1.5), "PooledPolysome")
+```
+
+Draw genes induced by No nutrient deprivation  
+```{r, fig.width=7, fig.height=7}
+lt1 <- list("up_NoArginine" = rownames(DE_list[[1]]))
+lt2 <- list("up_NoBCAA" = rownames(DE_list[[2]]))
+lt3 <- list("up_NoGlucose" = rownames(DE_list[[3]]))
+lt4 <- list("up_NoGlutamine" = rownames(DE_list[[4]]))
+lt5 <- list("up_NoMethionine" = rownames(DE_list[[5]]))
+draw_venn(lt1, lt2, lt3, lt4, lt5, "PooledPolysome", "up_regulation")
+```
+
+Draw genes depressed by No nutrient deprivation  
+```{r, fig.width=7, fig.height=7}
+lt1 <- list("down_NoArginine" = rownames(DE_list[[6]]))
+lt2 <- list("down_NoBCAA" = rownames(DE_list[[7]]))
+lt3 <- list("down_NoGlucose" = rownames(DE_list[[8]]))
+lt4 <- list("down_NoGlutamine" = rownames(DE_list[[9]]))
+lt5 <- list("down_NoMethionine" = rownames(DE_list[[10]]))
+draw_venn(lt1, lt2, lt3, lt4, lt5, "PooledPolysome", "down_regulation")
+```

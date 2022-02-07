@@ -1,0 +1,198 @@
+---
+title: "Onlink data analysis"
+author: "Chao Di, dic@email.chop.edu"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc_depth: 1
+    number_sections: yes
+  pdf_document:
+    toc_depth: '1'
+---
+
+```{r setup, include=FALSE, echo = FALSE, cache = FALSE, warning=FALSE}
+# replace with path where you want the results be
+knitr::opts_knit$set(root.dir="/Users/dic/Documents/Sarah Henrickson lab/Olink/")
+```
+
+## Abstract {-}
+Olink data analysis from the Normalized Protein eXpression (NPX) using R package `OlinkAnalyze`.
+NPX is Olink’s relative protein quantification unit on a log2 scale. NPX values from Olink Explore are calculated from the number of matched counts (= i.e. the number of  sequence reads for each specific combination of sample and assay) from the NovaSeq 6000 or NextSeq 2000 run.
+
+```{r, include=FALSE}
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(OlinkAnalyze)
+library(ggplot2)
+```
+
+### Preprocessing {-}
+
+```{r}
+## load data
+data <- read.xlsx("20211163_Henrickson_with_young_HC_NPX_2021-07-29.xlsx")
+SampleID_Group <- read.table("SampleID_Group.txt",header = T)
+
+data <- data %>% left_join(SampleID_Group)
+## Randomize samples on plate
+# olink_plate_randomizer(data, SubjectColumn ="SampleID", iterations=1000, seed=111)
+
+```
+
+### QC {-}
+
+* Scatterplot for QC (olink_qc_plot)
+The olink_qc_plot function generates a facet plot per Panel using ggplot and ggplot2::geom_point and stats::IQR plotting IQR vs. median for all samples. This is a good first check to find out if any samples have a tendency to be classified as outliers. Horizontal dashed lines indicate +/-3 standard deviations from the mean IQR. Vertical dashed lines indicate +/-3 standard deviations from the mean sample median.
+
+```{r}
+
+data %>% filter(!str_detect(SampleID, 'CONTROL_SAMPLE')) %>% olink_qc_plot(color_g = "QC_Warning")   
+```
+
+* Boxplots for QC (olink_dist_plot)
+The olink_dist_plot function generates boxplots of NPX values for each sample, faceted by Olink panel. This is mainly used as an initial QC step to identify potential outliers. olink_dist_plot uses the functions ggplot and geom_boxplot of the R library ggplot2.
+
+```{r}
+data %>% # For this example only plotting one panel.
+   filter(!str_detect(SampleID, 'CONTROL_SAMPLE')) %>% 
+  olink_dist_plot() +
+  theme(axis.text.x = element_text(angle=45, hjust=1, size=6)) # Due to the number of samples one can remove the text or rotate it
+
+
+```
+
+### PCA plot {-}
+```{r}
+
+data %>% filter(!str_detect(SampleID, 'CONTROL_SAMPLE')) %>% 
+         olink_pca_plot(., color_g = "QC_Warning")  
+```
+
+
+### Group comparison {-}
+Boxplots for outcomes (olink_boxplot). The olink_boxplot function is used to generate boxplots of NPX values stratified on a variable for a given list of proteins. olink_boxplot uses the functions ggplot and geom_boxplot of the R library ggplot2.
+```{r}
+
+p <- data %>% olink_boxplot(variable = "Group",
+                olinkid_list = c("OID20486","OID20487"))
+p[[1]]
+```
+
+### Statistical analysis {-}
+The olink_volcano_plot function generates a volcano plot using results from the olink_ttest function using the function ggplot and geom_point of the R library ggplot2. The estimated difference is shown in the x-axis and -log10(p-value) in the y-axis. A horizontal dotted line indicates p-value=0.05. Dots are colored based on Benjamini-Hochberg adjusted p-value cutoff 0.05 and can optionally be annotated by OlinkID.
+
+* perform t-test for STAT1GOF vs Healthy_Controls
+
+```{r}
+# perform t-test for STAT1GOF
+data1 = data %>% filter(Group %in% c('Healthy_Controls_young', 'STAT1GOF')) 
+data1$Group <- factor(data1$Group, levels=c("STAT1GOF", "Healthy_Controls_young"))
+ttest_results <- olink_ttest(df = data1, variable = 'Group')
+write.table(as.data.frame(ttest_results), file="STAT1GOF_vs_HC_ttest_results.tsv", sep="\t", quote=F, row.names = F)
+# select names of proteins to show
+top_10_name <- ttest_results %>%
+  slice_head(n = 10) %>%
+  pull(OlinkID)
+markers <- ttest_results %>% filter(Assay %in% c("IL6", "IL10", "PDCD1")) %>% pull(OlinkID)
+labels <- c(top_10_name, markers)
+# volcano plot
+options(ggrepel.max.overlaps = Inf)
+olink_volcano_plot(p.val_tbl = ttest_results,
+                   x_lab = 'Variant_vs_Healthy',
+                   olinkid_list = labels)
+cat("top 10 proteins and IL-6, IL-10 and PDCD1 are labeld")
+```
+
+* perform t-test for STAT3GOF vs Healthy_Controls
+```{r}
+# perform t-test for STAT3GOF
+data1 = data %>% filter(Group %in% c('Healthy_Controls_young', 'STAT3GOF'))
+data1$Group <- factor(data1$Group, levels=c("STAT3GOF", "Healthy_Controls_young"))
+ttest_results <- olink_ttest(df = data1, variable = 'Group')
+write.table(as.data.frame(ttest_results), file="STAT3GOF_vs_HC_ttest_results.tsv", sep="\t", quote=F, row.names = F)
+# select names of proteins to show
+top_10_name <- ttest_results %>%
+  slice_head(n = 10) %>%
+  pull(OlinkID)
+markers <- ttest_results %>% filter(Assay %in% c("IL6", "IL10", "PDCD1")) %>% pull(OlinkID)
+labels <- c(top_10_name, markers)
+# volcano plot
+options(ggrepel.max.overlaps = Inf)
+olink_volcano_plot(p.val_tbl = ttest_results,
+                   x_lab = 'Variant_vs_Healthy',
+                   olinkid_list = labels)
+cat("top 10 proteins and IL-6, IL-10 and PDCD1 are labeld")
+
+```
+
+* perform t-test for STAT3LOF vs Healthy_Controls
+```{r}
+# perform t-test for STAT3LOF
+data1 = data %>% filter(Group %in% c('Healthy_Controls_young', 'STAT3LOF')) 
+data1$Group <- factor(data1$Group, levels=c("STAT3LOF", "Healthy_Controls_young"))
+
+ttest_results <- olink_ttest(df = data1, variable = 'Group')
+write.table(as.data.frame(ttest_results), file="STAT3LOF_vs_HC_ttest_results.tsv", sep="\t", quote=F, row.names = F)
+# select names of proteins to show
+top_10_name <- ttest_results %>%
+  slice_head(n = 10) %>%
+  pull(OlinkID)
+markers <- ttest_results %>% filter(Assay %in% c("IL6", "IL10", "PDCD1")) %>% pull(OlinkID)
+labels <- c(top_10_name, markers)
+# volcano plot
+options(ggrepel.max.overlaps = Inf)
+olink_volcano_plot(p.val_tbl = ttest_results,
+                   x_lab = 'Variant_vs_Healthy',
+                   olinkid_list = labels)
+cat("top 10 proteins and IL-6, IL-10 and PDCD1 are labeld")
+
+```
+
+* perform t-test for CTLA4 vs Healthy_Controls
+```{r}
+# perform t-test for CTLA4
+data1 = data %>% filter(Group %in% c('Healthy_Controls_young', 'CTLA4'))
+data1$Group <- factor(data1$Group, levels=c("CTLA4", "Healthy_Controls_young"))
+
+ttest_results <- olink_ttest(df = data1, variable = 'Group')
+write.table(as.data.frame(ttest_results), file="CTLA4_vs_HC_ttest_results.tsv", sep="\t", quote=F, row.names = F)
+# select names of proteins to show
+top_10_name <- ttest_results %>%
+  slice_head(n = 10) %>%
+  pull(OlinkID)
+markers <- ttest_results %>% filter(Assay %in% c("IL6", "IL10", "PDCD1")) %>% pull(OlinkID)
+labels <- c(top_10_name, markers)
+# volcano plot
+options(ggrepel.max.overlaps = Inf)
+olink_volcano_plot(p.val_tbl = ttest_results,
+                   x_lab = 'Variant_vs_Healthy',
+                   olinkid_list = labels)
+cat("top 10 proteins and IL-6, IL-10 and PDCD1 are labeld")
+
+```
+
+* perform t-test for PTCRA vs Healthy_Controls
+```{r}
+# perform t-test for PTCRA
+data1 = data %>% filter(Group %in% c('Healthy_Controls_young', 'PTCRA')) 
+data1$Group <- factor(data1$Group, levels=c("PTCRA", "Healthy_Controls_young"))
+
+
+ttest_results <- olink_ttest(df = data1, variable = 'Group')
+
+write.table(as.data.frame(ttest_results), file="PTCRA_vs_HC_ttest_results.tsv", sep="\t", quote=F, row.names = F)
+# select names of proteins to show
+top_10_name <- ttest_results %>%
+  slice_head(n = 10) %>%
+  pull(OlinkID)
+markers <- ttest_results %>% filter(Assay %in% c("IL6", "IL10", "PDCD1")) %>% pull(OlinkID)
+labels <- c(top_10_name, markers)
+# volcano plot
+options(ggrepel.max.overlaps = Inf)
+olink_volcano_plot(p.val_tbl = ttest_results,
+                   x_lab = 'Variant_vs_Healthy',
+                   olinkid_list = labels)
+cat("top 10 proteins and IL-6, IL-10 and PDCD1 are labeld")
+
+```
