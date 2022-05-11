@@ -1,0 +1,313 @@
+---
+title: "scRNA-seq PTCRA (case1+case1 vs control)"
+author: "Chao Di, dic@chop.edu"
+output: 
+  html_document:
+    number_sections: true
+    code_folding: hide
+---
+
+```{r, setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, 
+                      warning = FALSE, 
+                      tidy = TRUE,
+                      fig.width = 10, 
+                      tidy.opts = list(width.cutoff = 95))
+ 
+```
+
+# Abstract  
+PTCRA patients in groups – PTCRA A, PTCRA B, PTCRA C and PTCRA D. The way of grouping patients may bring batch effect, which is difficult to tell. Need to find differentials within three patient/case - control groups.  
+
+```{r, include=FALSE}
+# library(scRNAseq)
+library(scater)
+library(SingleR)
+library(celldex)
+library(Seurat)
+library(RColorBrewer)
+library(sctransform)
+library(glmGamPoi)
+library(patchwork)
+library(tidyverse)
+library(reshape2)
+```
+
+# Prepare data
+## Load "all.ptcra.rds"
+Read filtered Seurat obj from previous analysis 
+```{r}
+all.ptcra <- readRDS("../all.ptcra.rds")
+```
+
+## read meta data
+```{r}
+# read metadata
+sample_info <- read.csv("../sample_info.txt", sep="\t")
+sample_info
+```
+
+# Overiew of the data - Basic quality control and filtering (already done)  
+Meta.data is the most important field for next steps. It can be acessed using both @ and [[]] operators. Right now it has 3 fields per celL: dataset ID, number of UMI reads detected per cell (nCount_RNA), and the number of expressed (detected) genes per same cell (nFeature_RNA).  
+
+## Add percentage of counts for mitochondrial genes and add cell cycle scores   
+
+## Filter cells 
+Filter cells that have unique feature counts over 2,500 (doublets or multiplets) or less than 200 and cells that have >5% mitochondrial counts  
+
+## Remove TCR segment genes
+
+## Save filtered obj
+```{r, eval=FALSE}
+saveRDS(all.ptcra, file="../all.ptcra.rds")
+```
+
+## metadata information  
+```{r}
+all.ptcra
+meta <- all.ptcra@meta.data
+dim(meta)
+summary(meta$nCount_RNA)
+summary(meta$nFeature_RNA)
+```
+
+## Visualize QC metrics as a violin plot   
+```{r, fig.width=10, fig.height=19}
+VlnPlot(all.ptcra, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 1)
+```
+
+## Visualize feature-feature relationships 
+```{r, fig.width=10, fig.height=8}
+plot1 <- FeatureScatter(all.ptcra, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(all.ptcra, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+
+# Data Integration (case1+case2)  
+Data normalization, Clustering, dimension reduction.  
+
+## Split object and SCTransform normalization
+Split object to patients and controls, normalize and identify variable features for each dataset independently. 
+
+```{r, eval = FALSE}
+subset.ptcra <- subset(all.ptcra, subset = (case_control=="case1"|case_control=="case2"|case_control=="control1"|case_control=="control2"))
+
+subset.ptcra.list <- SplitObject(subset.ptcra, split.by = "Condition")
+ctrl <- subset.ptcra.list[["HC"]]
+ptcra <- subset.ptcra.list[["PTCRA"]]
+
+ctrl <- SCTransform(ctrl, vst.flavor = "v2", method = "glmGamPoi", vars.to.regress = c("percent.mt","S.Score","G2M.Score"), verbose = FALSE)
+ptcra <- SCTransform(ptcra, vst.flavor = "v2", method = "glmGamPoi", vars.to.regress = c("percent.mt","S.Score","G2M.Score"), verbose = FALSE)
+subset.ptcra.list <- list(HC = ctrl, PTCRA = ptcra)
+```
+
+## Select features
+Select features that are repeatedly variable across datasets for integration, and run `PrepSCTIntegration`, which ensures that all necessary Pearson residuals have been calculated.  
+
+```{r, eval = FALSE}
+subset.ptcra.features <- SelectIntegrationFeatures(object.list = subset.ptcra.list, nfeatures = 3000)
+
+subset.ptcra.list <- PrepSCTIntegration(object.list = subset.ptcra.list, anchor.features = subset.ptcra.features)
+```
+
+## Run PCA on each object 
+Run PCA on each object in the list, which is required for running the reciprocal PCA in `FindIntegrationAnchors`  
+
+```{r, eval = FALSE}
+for (i in 1:length(subset.ptcra.list)) {
+    subset.ptcra.list[[i]] <- RunPCA(subset.ptcra.list[[i]], features = subset.ptcra.features)
+}
+```
+## Save object `subset.ptcra.list`
+Save `subset.ptcra.list` before extract specific datasets.  
+```{r, eval = FALSE}
+saveRDS(subset.ptcra.list, file="subset.ptcra.list.rds")
+```
+
+## Load objects `ptcra.integrated`
+Load integrated objects instead of running the following chunks (set eval=FALSE) again when knitting.  
+```{r}
+ptcra.integrated<- readRDS("ptcra.integrated.rds")
+```
+
+## Identify anchors and integrate the datasets
+Make sure to set normalization.method = **"SCT"**, and reduction = **"rpca"** for reciprocal PCA 
+```{r, eval = FALSE}
+
+ptcra.anchors <- FindIntegrationAnchors(object.list = subset.ptcra.list, normalization.method = "SCT", anchor.features = subset.ptcra.features, reduction = "rpca")
+ptcra.integrated <- IntegrateData(anchorset = ptcra.anchors, normalization.method = "SCT")
+
+```
+
+# Proceed with downstream analysis on the integrated dataset
+## PCA and Clustering  
+```{r, eval = FALSE}
+ptcra.integrated <- RunPCA(ptcra.integrated)
+ptcra.integrated <- RunUMAP(ptcra.integrated, reduction = "pca", dims = 1:30)
+ptcra.integrated <- FindNeighbors(ptcra.integrated, reduction = "pca", dims = 1:30)
+ptcra.integrated <- FindClusters(ptcra.integrated, resolution = 0.5)
+```
+
+## Visualization  
+```{r, fig.height=9, fig.width=16}
+DefaultAssay(ptcra.integrated) <- "integrated"
+
+p1 <- DimPlot(ptcra.integrated, reduction = "umap", group.by = "Condition")
+p2 <- DimPlot(ptcra.integrated, reduction = "umap", label = TRUE, repel = TRUE) + NoLegend()
+
+p1 + p2 + plot_annotation(title = "HC and PTCRA integrated", theme = theme(plot.title = element_text(size = 24, hjust = 0.5)))
+
+DimPlot(ptcra.integrated, reduction = "umap", label = FALSE, split.by = "Condition") + theme(legend.position = "top") + plot_annotation(title = "HC vs PTCRA", theme = theme(plot.title = element_text(size = 24, hjust = 0.5)))
+```
+
+## Cell type annotation using SingleR
+Get reference datasets from `celldex` package. Note that there are two cell type assignments, `label.main` and `label.fine`. Convert our Seurat object to single cell experiment (SCE).   
+```{r, eval = FALSE}
+# use MonacoImmuneData as reference, can also use HumanPrimaryCellAtlasData or DatabaseImmuneCellExpressionData
+monaco.ref <- celldex::MonacoImmuneData()
+
+DefaultAssay(ptcra.integrated) <- "RNA"
+ptcra_sce <- as.SingleCellExperiment(DietSeurat(ptcra.integrated))
+ptcra_sce
+```
+Run `SingleR`  
+
+```{r, eval = FALSE}
+ptcra_sce.monaco.main <- SingleR(test = ptcra_sce, assay.type.test = 1, ref = monaco.ref, labels = monaco.ref$label.main)
+ptcra_sce.monaco.fine <- SingleR(test = ptcra_sce, assay.type.test = 1, ref = monaco.ref, labels = monaco.ref$label.fine)
+```
+
+Add the annotations to the Seurat object metadata (or replace previous labels).    
+```{r, eval = FALSE}
+ptcra.integrated@meta.data$SingleR.labels_Monaco <- ptcra_sce.monaco.fine$pruned.labels
+```
+## Compare the number of cells in each cell type
+```{r}
+ptcra.integrated$celltype <- ptcra.integrated@meta.data$SingleR.labels_Monaco
+table(ptcra.integrated@meta.data$celltype, ptcra.integrated@meta.data$Condition)
+
+```
+## plot comparisons
+```{r, fig.height=8}
+plot_integrated_celltypes = function (srat) { 
+  count_table <- table(srat@meta.data$celltype, srat@meta.data$Condition)
+  count_mtx   <- as.data.frame.matrix(count_table)
+  count_mtx$celltype <- rownames(count_mtx)
+  melt_mtx <- melt(count_mtx)
+  
+
+  celltype_size <- aggregate(value ~ celltype, data = melt_mtx, FUN = sum)
+  celltype_size <- celltype_size %>% dplyr::arrange(value)
+  celltype_size$celltype <- factor(celltype_size$celltype, levels=celltype_size$celltype)
+  melt_mtx$celltype <- factor(melt_mtx$celltype, levels=celltype_size$celltype)
+  colnames(melt_mtx)[2] <- "dataset"
+  
+  
+  p1 <- ggplot(celltype_size, aes(y= celltype, x = value)) + geom_bar(position="dodge", stat="identity",fill = "grey60") + 
+    theme_bw() + scale_x_log10() + xlab("Cells per celltype, log10 scale") + ylab("")
+  p2 <- ggplot(melt_mtx,aes(x=celltype,y=value,fill=dataset)) + 
+    geom_bar(position="fill", stat="identity") + theme_bw() + coord_flip() + 
+    scale_fill_brewer(palette = "Set2") +
+    ylab("Fraction of cells in each dataset") + xlab("celltype number") + theme(legend.position="top")
+  
+  p2 + p1 + plot_layout(widths = c(3,1))
+}
+
+plot_integrated_celltypes(ptcra.integrated)
+```
+
+
+## Visualize the fine-grained annotations.  
+```{r, fig.height=7, fig.width=14}
+# Summary of general cell type annotations. 
+# remove NA labeled samples
+ptcra.integrated <- ptcra.integrated[,!is.na(ptcra.integrated$SingleR.labels_Monaco)]
+
+ptcra.integrated <- SetIdent(ptcra.integrated, value = "SingleR.labels_Monaco")
+DimPlot(ptcra.integrated, reduction = "umap", label = TRUE, label.size=3, repel = TRUE, split.by = "Condition") + theme(legend.position = "top")
+```
+
+Plot some markers.  
+```{r}
+FeaturePlot(ptcra.integrated,c("CCR7", "SELL","PTPRC", "IL7R","IL2RG","CD27", "CD79A", "FCGR3A", "PPBP")) 
+```
+
+Save object `ptcra.integrated`.    
+```{r, eval= FALSE}
+saveRDS(ptcra.integrated, file="ptcra.integrated.rds")
+```
+
+## Identify differential expressed genes between patients vs controls for all cells
+We’ve aligned the patient and control cells. We choose **all cells** for differential expression analysis between patients and controls.
+We create a column in the meta.data slot to hold both the cell type and case_control information and switch the current ident to that column. Then we use `FindMarkers()` to find the genes that are different between patient and control. 
+
+### Load previous results
+```{r}
+response <- readRDS("PTCRA_vs_HC_DE.rds")
+head(response %>% arrange(desc(avg_log2FC)), 5)
+head(response %>% arrange(avg_log2FC), 5)
+```
+
+### Finding differential expression markers 
+```{r, eval=FALSE}
+library(ggplot2)
+library(cowplot)
+theme_set(theme_cowplot())
+
+Idents(ptcra.integrated) <- "Condition"
+response <- FindMarkers(ptcra.integrated, ident.1 = "PTCRA", ident.2 = "HC", min.pct = 0.25)
+head(response %>% arrange(desc(avg_log2FC)), 5)
+head(response %>% arrange(avg_log2FC), 5)
+response <- response %>% filter(p_val_adj<0.05)
+```
+
+### Save DE results to table
+```{r, eval=FALSE}
+write.table(data.frame("GeneSymbol"=rownames(response), response), file="PTCRA_vs_HC_DE.tsv", sep="\t", quote=FALSE, col.names = TRUE, row.names=FALSE )
+saveRDS(response, file="PTCRA_vs_HC_DE.rds")
+```
+
+### Visualization.    
+```{r, fig.height=12}
+FeaturePlot(ptcra.integrated, features = c("EMP3", "CRIP1", "GAS5"), split.by = "Condition", max.cutoff = 3,
+    cols = c("grey", "red"))
+
+plots <- VlnPlot(ptcra.integrated, features = c("EMP3", "CRIP1", "GAS5"), split.by = "Condition", group.by = "celltype",
+    pt.size = 0, combine = FALSE)
+wrap_plots(plots = plots, ncol = 1)
+```
+```{r}
+
+top20markers <- rbind(head(response %>% arrange(desc(avg_log2FC)), 25), head(response %>% arrange(avg_log2FC), 25))
+
+count_table <- table(ptcra.integrated@meta.data$celltype, ptcra.integrated@meta.data$Condition)
+count_mtx   <- as.data.frame.matrix(count_table)
+count_mtx$celltype <- rownames(count_mtx)
+melt_mtx <- melt(count_mtx)
+celltype_size <- aggregate(value ~ celltype, data = melt_mtx, FUN = sum)
+top_cells <- celltype_size %>% arrange(desc(value)) %>% filter(value>=690)
+  
+Idents(ptcra.integrated) <- "celltype"
+ptcra.integrated$case_control <- factor(ptcra.integrated$case_control, levels=c("control1", "case1", "control2", "case2"))
+pdf("case1+2_vs_control_heatmap.pdf", 8,8)
+
+# all cells together
+p1 <- DoHeatmap(ptcra.integrated, features = rownames(top20markers),
+          group.by = c("case_control"),
+          assay = "SCT",
+          label = FALSE) + plot_annotation(title = "all cells", theme = theme(plot.title = element_text(size = 18, hjust = 0.5)))
+print(p1)
+
+for (cell in top_cells$celltype) {
+p <- DoHeatmap(subset(ptcra.integrated, idents=cell), features = rownames(top20markers),
+          group.by = c("case_control"),
+          assay = "SCT",
+          label = FALSE) + plot_annotation(title = cell, theme = theme(plot.title = element_text(size = 18, hjust = 0.5)))
+print(p)
+}
+dev.off()
+```
+
+
+
