@@ -1,0 +1,378 @@
+---
+title: "Motif analysis for translational up/down genes in Glucose deprivation (denovo search)"
+author: "Chao Di, dic@email.chop.edu"
+output:
+  html_document:
+    number_sections: false
+    code_folding: show
+editor_options: 
+  chunk_output_type: inline
+---
+## Abstract {-}
+1. Denovo search (Streme) for motifs at UTR region of translational up/down genes.  
+2. Find all the UTRs that containing the denovo motifs (Fimo).  
+3. Compare expression fold-change for genes with the motifs vs all genes.  
+This script is for doing Motif analysis using MEME suite's R interface `memes`.
+
+```{r setup, include=FALSE}
+# work dir
+# knitr::opts_knit$set(root.dir="/home/dic/bailis_lab/projects/BailisW_polysome_profiling_312911604/workflow/scripts/motif_analysis/transcription_reg_glucose_test")
+knitr::opts_chunk$set(message = FALSE, 
+                      warning = FALSE, 
+                      tidy = TRUE
+                      # fig.width = 10, 
+                      # tidy.opts = list(width.cutoff = 95)
+                      )
+```
+
+```{r include=FALSE}
+options(meme_bin = "/mnt/isilon/dbhi_bfx/dic/miniconda3/envs/meme/bin/")
+options(meme_db = "/mnt/isilon/bailis_lab/projects/BailisW_polysome_profiling_312911604/resources/motif_databases/JASPAR/JASPAR2022_CORE_vertebrates_non-redundant.meme", package = "memes", mustWork = TRUE)
+proj_path <- "/home/dic/bailis_lab/projects/BailisW_polysome_profiling_312911604"
+library(rlang)
+library(dplyr)
+library(GenomicRanges)
+library(magrittr)
+library(comprehenr)
+library(memes)
+library(universalmotif)
+library(motifStack)
+library(biomaRt)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(jjb)
+library(ggplot2)
+```
+
+
+## Load `anota2seq` output tables
+These tables included groups of genes categorized in diffreent regulation modes: **mRNA abundance**, **buffering**, and **translation**. We'll focus on genes of differentailly translated between conditions.
+
+Load `anota2seq` output table
+```{r}
+anota2seq <- read.table("Polysome_anota2seq.tsv", header=TRUE)
+
+```
+
+Establish biomart object
+```{r, eval=FALSE}
+# use mm10/GRCm38.p6(Ensembl)
+mart=useMart("ENSEMBL_MART_ENSEMBL",dataset="mmusculus_gene_ensembl" ,host="nov2020.archive.ensembl.org")
+```
+
+## Get UTR sequences using `biomaRt` 
+### Load object `seqtab_list.rds`
+Load `seqtab_list.rds` instead of running the following chunks (set eval=FALSE) again when knitting.  
+```{r}
+seqtab_list <- readRDS("seqtab_list.rds")
+```
+
+### Function for retrieving UTR sequences
+```{r}
+get_seqs <- function(nutrient, up_down, utr_type, pval_cutoff, logfc, top_num){
+
+    translation_change <- paste(nutrient, up_down, sep = "_")
+    
+    regmode <- paste0("No",nutrient,"_singleRegMode")
+    eff <- paste0("No", nutrient, "_translation.apvEff")
+    padj <- paste0("No", nutrient, "_translation.apvRvmPAdj")
+
+    if (up_down == "up") {
+        translation_change <- anota2seq %>% 
+            dplyr::select(contains(c("GeneSymbol", nutrient))) %>% 
+            dplyr::filter(!!sym(regmode) == "translation", !!sym(eff) >= logfc, !!sym(padj) <= pval_cutoff) %>%
+            dplyr::arrange(!!padj)
+    } else {
+        translation_change <- anota2seq %>% 
+        dplyr::select(contains(c("GeneSymbol", nutrient))) %>% 
+        dplyr::filter(!!sym(regmode) == "translation", !!sym(eff) <= -logfc, !!sym(padj) <= pval_cutoff) %>%
+        dplyr::arrange(!!padj)
+    }
+    
+    cat("Number of input genes: ", dim(translation_change)[1], "\n")
+    inputGenes <- head(translation_change, top_num)$GeneSymbol
+    
+    if (utr_type == "utr5") {
+        utr5_1 = getBM(attributes = c("mgi_symbol", "ensembl_gene_id","ensembl_transcript_id"),
+                          filters = "mgi_symbol", values=inputGenes,
+                          mart = mart)
+        utr5_2 = getBM(attributes = c("ensembl_transcript_id","chromosome_name","5_utr_start","5_utr_end"),
+                          filters = "ensembl_transcript_id", values=as.character(utr5_1[,3]),
+                          mart = mart) 
+        ut5r_2 <- utr5_2 %>% dplyr::filter(!is.na(`5_utr_start`))
+        utr5 <- merge(utr5_1, utr5_2)
+        utr5$`5_utr_len` <- utr5$`5_utr_end` - utr5$`5_utr_start` + 1
+        utr5 <- utr5 %>% dplyr::filter(`5_utr_len` >= 30)
+        utr5 <- utr5 %>% dplyr::filter(!grepl('CHR|GL', chromosome_name))
+        utr5$chromosome_name <- paste0("chr", utr5$chromosome_name)
+        
+        # BSgenome version should match Ensembl biomart version
+        utr5seq <- as.data.frame(Biostrings::getSeq(BSgenome.Mmusculus.UCSC.mm10, utr5$chromosome_name, utr5$`5_utr_start`, utr5$`5_utr_end`))
+        utr5 <- cbind(utr5, utr5seq)
+        colnames(utr5)[8] <- "5_utr_seq"
+        return(utr5)
+    } else {
+        utr3_1 = getBM(attributes = c("mgi_symbol", "ensembl_gene_id","ensembl_transcript_id"),
+                          filters = "mgi_symbol", values=inputGenes,
+                          mart = mart)
+        utr3_2 = getBM(attributes = c("ensembl_transcript_id","chromosome_name","3_utr_start","3_utr_end"),
+                          filters = "ensembl_transcript_id", values=as.character(utr3_1[,3]),
+                          mart = mart) 
+        ut3r_2 <- utr3_2 %>% dplyr::filter(!is.na(`3_utr_start`))
+        utr3 <- merge(utr3_1, utr3_2)
+        utr3$`3_utr_len` <- utr3$`3_utr_end` - utr3$`3_utr_start` + 1
+        utr3 <- utr3 %>% dplyr::filter(`3_utr_len` >= 30)
+        utr3 <- utr3 %>% dplyr::filter(!grepl('CHR|GL', chromosome_name))
+        utr3$chromosome_name <- paste0("chr", utr3$chromosome_name)
+        
+        # BSgenome version should match Ensembl biomart version
+        utr3seq <- as.data.frame(Biostrings::getSeq(BSgenome.Mmusculus.UCSC.mm10, utr3$chromosome_name, utr3$`3_utr_start`, utr3$`3_utr_end`))
+        utr3 <- cbind(utr3, utr3seq)
+        colnames(utr3)[8] <- "3_utr_seq"
+        return(utr3)
+    }
+}
+```
+
+### Get UTR sequences for top 500 up/down genes, only for Glucose
+```{r, eval=FALSE}
+seqtab_list <- list()
+for (nutrient in c("Glucose")) {
+# for (nutrient in c("Arginine", "BCAA", "Glucose", "Glutamine", "Methionine")) {
+    for(up_down in c("up","down")) {
+        for(utr_type in c("utr5","utr3")) {
+            tab_name <- paste(nutrient, up_down, utr_type, sep = "_")
+            print(tab_name)
+            assign(tab_name, get_seqs(nutrient, up_down, utr_type, 0.05, log2(1.5), 500))
+            seqtab_list[[tab_name]] <- get(tab_name)
+        }
+    }
+}
+```
+### Save UTR sequences
+```{r, eval=FALSE}
+saveRDS(seqtab_list, file="seqtab_list.rds")
+```
+
+## Denovo Motif serching using `Streme`
+TREME discovers ungapped motifs (recurring, fixed-length patterns) that are enriched in your sequences or relatively enriched in them compared to your control sequences
+
+### load saved streme output list without running codes again. 
+```{r}
+streme_out_list <- readRDS("streme_out_list.rds")
+```
+
+### Run Streme for all conditions for translational up and down genes, both 5'UTR and 3'UTR
+```{r, eval=FALSE}
+
+streme_out_list <- list()
+for (tab_name in names(seqtab_list)) {
+    
+    set_dir = paste(proj_path,"/results/motif_analysis/translation_reg_glucose_denovo_motif/streme_out", tab_name, sep="/")
+    mkdir(set_dir, r=TRUE)
+    streme_out_name <- paste0("streme_out_", tab_name)
+    print(streme_out_name)
+    
+    seq_tab <- seqtab_list[[tab_name]]
+    if (grepl("5_utr", colnames(seq_tab)[8])) {
+        inputseq <- DNAStringSet(seq_tab$`5_utr_seq`)
+        names(inputseq) <- paste(seq_tab$mgi_symbol, seq_tab$chromosome_name, seq_tab$`5_utr_start`, seq_tab$`5_utr_end`, sep=":")
+    } else {
+        inputseq <- DNAStringSet(seq_tab$`3_utr_seq`)
+        names(inputseq) <- paste(seq_tab$mgi_symbol, seq_tab$chromosome_name, seq_tab$`3_utr_start`, seq_tab$`3_utr_end`, sep=":")
+    }
+    
+    streme_out <- runStreme(inputseq, "shuffle", alph = "rna", outdir = set_dir)
+    streme_out_list[[tab_name]] <- streme_out
+}
+```
+
+
+### Save Streme output 
+```{r, eval=FALSE}
+saveRDS(streme_out_list, file="streme_out_list.rds")
+```
+
+### Show motifs {.tabset}
+
+#### Glucose
+```{r}
+for (tab_name in names(seqtab_list)[grep("Glucose", names(seqtab_list))]) {
+    streme_out_name <- paste0("streme_out_", tab_name)
+    print(streme_out_name)
+    p<- head(streme_out_list[[tab_name]],5) %>% universalmotif::to_list() %>% view_motifs()
+    print(p)
+}
+```
+
+
+## FIMO scans all gene UTR sequences for individual matches to STREME motifs
+The name FIMO stands for 'Find Individual Motif Occurrences'. The program searches a set of sequences for occurrences of known motifs, treating each motif independently. Motifs must be in MEME Motif Format. The web version of FIMO also allows you to type in motifs in additional formats.
+
+### load saved Fimo output (a dboule list) without running codes again. 
+```{r}
+fimo_out_list <- readRDS("fimo_out_list.rds")
+```
+
+### Get UTR sequences for all genes
+```{r, eval=FALSE}
+seqtab_allUTR_list <- list()
+get_utr_seqs <- function(nutrient, utr_type){
+    nutrient = "Glucose"
+
+    if (utr_type == "utr5") {
+        utr5_1 = getBM(attributes = c("mgi_symbol", "ensembl_gene_id","ensembl_transcript_id"),
+                          filters = "mgi_symbol", values=anota2seq$GeneSymbol,
+                          mart = mart)
+        utr5_2 = getBM(attributes = c("ensembl_transcript_id","chromosome_name","5_utr_start","5_utr_end"),
+                          filters = "ensembl_transcript_id", values=as.character(utr5_1[,3]),
+                          mart = mart) 
+        ut5r_2 <- utr5_2 %>% dplyr::filter(!is.na(`5_utr_start`))
+        utr5 <- merge(utr5_1, utr5_2)
+        utr5$`5_utr_len` <- utr5$`5_utr_end` - utr5$`5_utr_start` + 1
+        utr5 <- utr5 %>% dplyr::filter(`5_utr_len` >= 30)
+        utr5 <- utr5 %>% dplyr::filter(!grepl('CHR|GL', chromosome_name))
+        utr5$chromosome_name <- paste0("chr", utr5$chromosome_name)
+        
+        # BSgenome version should match Ensembl biomart version
+        utr5seq <- as.data.frame(Biostrings::getSeq(BSgenome.Mmusculus.UCSC.mm10, utr5$chromosome_name, utr5$`5_utr_start`, utr5$`5_utr_end`))
+        utr5 <- cbind(utr5, utr5seq)
+        colnames(utr5)[8] <- "5_utr_seq"
+        return(utr5)
+    } else {
+        utr3_1 = getBM(attributes = c("mgi_symbol", "ensembl_gene_id","ensembl_transcript_id"),
+                          filters = "mgi_symbol", values=anota2seq$GeneSymbol,
+                          mart = mart)
+        utr3_2 = getBM(attributes = c("ensembl_transcript_id","chromosome_name","3_utr_start","3_utr_end"),
+                          filters = "ensembl_transcript_id", values=as.character(utr3_1[,3]),
+                          mart = mart) 
+        ut3r_2 <- utr3_2 %>% dplyr::filter(!is.na(`3_utr_start`))
+        utr3 <- merge(utr3_1, utr3_2)
+        utr3$`3_utr_len` <- utr3$`3_utr_end` - utr3$`3_utr_start` + 1
+        utr3 <- utr3 %>% dplyr::filter(`3_utr_len` >= 30)
+        utr3 <- utr3 %>% dplyr::filter(!grepl('CHR|GL', chromosome_name))
+        utr3$chromosome_name <- paste0("chr", utr3$chromosome_name)
+        
+        # BSgenome version should match Ensembl biomart version
+        utr3seq <- as.data.frame(Biostrings::getSeq(BSgenome.Mmusculus.UCSC.mm10, utr3$chromosome_name, utr3$`3_utr_start`, utr3$`3_utr_end`))
+        utr3 <- cbind(utr3, utr3seq)
+        colnames(utr3)[8] <- "3_utr_seq"
+        return(utr3)
+    }
+}
+
+seqtab_allUTR_list <- list(utr5=get_utr_seqs("Glucose","utr5"), utr3=get_utr_seqs("Glucose","utr3"))
+```
+
+### Save UTR sequences
+```{r, eval=FALSE}
+saveRDS(seqtab_allUTR_list, file="seqtab_allUTR_list.rds")
+```
+
+### Run Fimo for top5 Streme motifs
+```{r, eval=FALSE}
+
+fimo_out_list <- list()
+for (tab_name in names(streme_out_list)) {
+    
+    streme_out <- streme_out_list[[tab_name]]
+    fimo_out_name <- paste0("fimo_out_", tab_name)
+    print(fimo_out_name)
+    
+    # get input sequences
+    if (grepl("utr5", tab_name)) {
+        seq_tab <- seqtab_allUTR_list$utr5
+        inputseq <- DNAStringSet(seq_tab$`5_utr_seq`)
+        names(inputseq) <- paste(seq_tab$mgi_symbol, seq_tab$chromosome_name, seq_tab$`5_utr_start`, seq_tab$`5_utr_end`, sep=":")
+    } else {
+        seq_tab <- seqtab_allUTR_list$utr3
+        inputseq <- DNAStringSet(seq_tab$`3_utr_seq`)
+        names(inputseq) <- paste(seq_tab$mgi_symbol, seq_tab$chromosome_name, seq_tab$`3_utr_start`, seq_tab$`3_utr_end`, sep=":")
+    }
+    # search top5 motifs from streme
+    for (streme_motif in head(streme_out$motif,5)) {
+        streme_motif_name <- streme_motif['name']
+        print(streme_motif_name)
+        set_dir = paste0(proj_path, "/results/motif_analysis/translation_reg_glucose_denovo_motif/fimo_out", "/", tab_name, "/", streme_motif_name)
+        mkdir(set_dir, r=TRUE)
+        
+        fimo_out <- runFimo(inputseq, streme_motif, text=FALSE, outdir=set_dir)
+        fimo_out_list[[tab_name]][[streme_motif_name]] <- fimo_out
+    }
+}
+```
+
+### Save Fimo output to a double list
+```{r, eval=FALSE}
+saveRDS(fimo_out_list, file="fimo_out_list.rds")
+```
+
+## Compare up/down fc for genes with denovo motifs vs all genes 
+
+### Prepare data to plot
+```{r}
+data2plot_list <- list()
+for (tab_name in names(fimo_out_list)) {
+    print(tab_name)
+    all_motif_genes <- data.frame(matrix(ncol=7, nrow=0))
+    for (motif_name in names(fimo_out_list[[tab_name]])) {
+        print(motif_name)
+        motif <- fimo_out_list[[tab_name]][[motif_name]]
+        motif_genes <- anota2seq[anota2seq$GeneSymbol %in% seqnames(motif), ] %>% dplyr::select(contains(c("GeneSymbol", "Glucose")))
+        motif_genes <- cbind(group=motif_name, motif_genes)
+        all_motif_genes <- rbind(all_motif_genes, motif_genes)
+    }
+    data <- rbind(all_motif_genes, cbind(group="all_gene", anota2seq %>% dplyr::select(contains(c("GeneSymbol", "Glucose")))))
+    data2plot_list[[tab_name]] <- data
+}
+```
+
+### Prepare data to plot {.tabset}
+#### up_utr5
+```{r}
+p <- ggplot(data2plot_list$Glucose_up_utr5, aes(x=group, y=NoGlucose_translation.apvEff, color=group)) +
+  geom_violin() +
+  geom_boxplot(width=0.1) +
+  theme_classic() +
+  theme(axis.text.x = element_blank()) + 
+  ylab("log2FC") +
+  xlab("motif groups")
+print(p)
+```
+
+#### up_utr3
+```{r}
+p <- ggplot(data2plot_list$Glucose_up_utr3, aes(x=group, y=NoGlucose_translation.apvEff, color=group)) +
+  geom_violin() +
+  geom_boxplot(width=0.1) +
+  theme_classic() +
+  theme(axis.text.x = element_blank()) + 
+  ylab("log2FC") +
+  xlab("motif groups")
+print(p)
+```
+
+#### down_utr5
+```{r}
+p <- ggplot(data2plot_list$Glucose_down_utr5, aes(x=group, y=NoGlucose_translation.apvEff, color=group)) +
+  geom_violin() +
+  geom_boxplot(width=0.1) +
+  theme_classic() +
+  theme(axis.text.x = element_blank()) + 
+  ylab("log2FC") +
+  xlab("motif groups")
+print(p)
+```
+
+#### down_utr3
+```{r}
+p <- ggplot(data2plot_list$Glucose_down_utr3, aes(x=group, y=NoGlucose_translation.apvEff, color=group)) +
+  geom_violin() +
+  geom_boxplot(width=0.1) +
+  theme_classic() +
+  theme(axis.text.x = element_blank()) + 
+  ylab("log2FC") +
+  xlab("motif groups")
+print(p)
+```
+
+

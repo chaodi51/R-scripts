@@ -1,0 +1,372 @@
+---
+title: "Motif analysis for Glucose (miRNA motifs)"
+author: "Chao Di, dic@email.chop.edu"
+output:
+  html_document:
+    number_sections: false
+    code_folding: show
+editor_options: 
+  chunk_output_type: inline
+---
+## Abstract {-}
+1. Locate miRNA motifs from public databases.
+2. Find all the UTRs that containing the RBP motifs (Fimo).  
+3. Compare expression fold-change for genes with the motifs vs all genes.  
+This script is for doing Motif analysis using MEME suite's R interface `memes`.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, 
+                      warning = FALSE, 
+                      tidy = TRUE
+                      # fig.width = 10, 
+                      # tidy.opts = list(width.cutoff = 95)
+                      )
+```
+
+```{r include=FALSE}
+options(meme_bin = "/mnt/isilon/dbhi_bfx/dic/miniconda3/envs/meme/bin/")
+proj_path <- "/home/dic/bailis_lab/projects/BailisW_polysome_profiling_312911604"
+library(rlang)
+library(dplyr)
+library(GenomicRanges)
+library(magrittr)
+library(comprehenr)
+library(memes)
+library(universalmotif)
+library(motifStack)
+library(biomaRt)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(jjb)
+library(ggplot2)
+```
+
+
+## Load `anota2seq` output tables
+These tables included groups of genes categorized in diffreent regulation modes: **mRNA abundance**, **buffering**, and **translation**. We'll focus on genes of differentailly translated between conditions.
+
+Load `anota2seq` output table
+```{r}
+anota2seq <- read.table("Polysome_anota2seq.tsv", header=TRUE)
+```
+
+Establish biomart object
+```{r, eval=FALSE}
+# use mm10/GRCm38.p6(Ensembl)
+mart=useMart("ENSEMBL_MART_ENSEMBL",dataset="mmusculus_gene_ensembl" ,host="nov2020.archive.ensembl.org")
+```
+
+## FIMO scans all gene UTR sequences for individual matches to STREME motifs
+The name FIMO stands for 'Find Individual Motif Occurrences'. The program searches a set of sequences for occurrences of known motifs, treating each motif independently. Motifs must be in MEME Motif Format. The web version of FIMO also allows you to type in motifs in additional formats.
+
+
+### Load object `seqtab_list.rds`
+Load `seqtab_list.rds` instead of running the following chunks (set eval=FALSE) again when knitting.  
+```{r}
+seqtab_allUTR_list <- readRDS("seqtab_allUTR_list.rds")
+```
+
+### Get UTR sequences for all genes
+```{r, eval=FALSE}
+seqtab_allUTR_list <- list()
+get_utr_seqs <- function(nutrient, utr_type){
+    nutrient = "Glucose"
+
+    if (utr_type == "utr5") {
+        utr5_1 = getBM(attributes = c("mgi_symbol", "ensembl_gene_id","ensembl_transcript_id"),
+                          filters = "mgi_symbol", values=anota2seq$GeneSymbol,
+                          mart = mart)
+        utr5_2 = getBM(attributes = c("ensembl_transcript_id","chromosome_name","5_utr_start","5_utr_end"),
+                          filters = "ensembl_transcript_id", values=as.character(utr5_1[,3]),
+                          mart = mart) 
+        ut5r_2 <- utr5_2 %>% dplyr::filter(!is.na(`5_utr_start`))
+        utr5 <- merge(utr5_1, utr5_2)
+        utr5$`5_utr_len` <- utr5$`5_utr_end` - utr5$`5_utr_start` + 1
+        utr5 <- utr5 %>% dplyr::filter(`5_utr_len` >= 30)
+        utr5 <- utr5 %>% dplyr::filter(!grepl('CHR|GL', chromosome_name))
+        utr5$chromosome_name <- paste0("chr", utr5$chromosome_name)
+        
+        # BSgenome version should match Ensembl biomart version
+        utr5seq <- as.data.frame(Biostrings::getSeq(BSgenome.Mmusculus.UCSC.mm10, utr5$chromosome_name, utr5$`5_utr_start`, utr5$`5_utr_end`))
+        utr5 <- cbind(utr5, utr5seq)
+        colnames(utr5)[8] <- "5_utr_seq"
+        return(utr5)
+    } else {
+        utr3_1 = getBM(attributes = c("mgi_symbol", "ensembl_gene_id","ensembl_transcript_id"),
+                          filters = "mgi_symbol", values=anota2seq$GeneSymbol,
+                          mart = mart)
+        utr3_2 = getBM(attributes = c("ensembl_transcript_id","chromosome_name","3_utr_start","3_utr_end"),
+                          filters = "ensembl_transcript_id", values=as.character(utr3_1[,3]),
+                          mart = mart) 
+        ut3r_2 <- utr3_2 %>% dplyr::filter(!is.na(`3_utr_start`))
+        utr3 <- merge(utr3_1, utr3_2)
+        utr3$`3_utr_len` <- utr3$`3_utr_end` - utr3$`3_utr_start` + 1
+        utr3 <- utr3 %>% dplyr::filter(`3_utr_len` >= 30)
+        utr3 <- utr3 %>% dplyr::filter(!grepl('CHR|GL', chromosome_name))
+        utr3$chromosome_name <- paste0("chr", utr3$chromosome_name)
+        
+        # BSgenome version should match Ensembl biomart version
+        utr3seq <- as.data.frame(Biostrings::getSeq(BSgenome.Mmusculus.UCSC.mm10, utr3$chromosome_name, utr3$`3_utr_start`, utr3$`3_utr_end`))
+        utr3 <- cbind(utr3, utr3seq)
+        colnames(utr3)[8] <- "3_utr_seq"
+        return(utr3)
+    }
+}
+
+seqtab_allUTR_list <- list(utr5=get_utr_seqs("Glucose","utr5"), utr3=get_utr_seqs("Glucose","utr3"))
+```
+
+### Save UTR sequences
+```{r, eval=FALSE}
+saveRDS(seqtab_allUTR_list, file="seqtab_allUTR_list.rds")
+```
+
+
+### Run Fimo for all annotated miRNA motifs on UTRs
+```{r, eval=FALSE}
+
+# search RNA motifs in databases
+RNAdb <- read_meme("/mnt/isilon/bailis_lab/projects/BailisW_polysome_profiling_312911604/resources/motif_databases/MIRBASE/22/Mus_musculus_mmu.meme")
+    
+# get 5'UTR sequences
+seq_tab5 <- seqtab_allUTR_list$utr5
+inputseq5 <- DNAStringSet(seq_tab5$`5_utr_seq`)
+names(inputseq5) <- paste(seq_tab5$mgi_symbol, seq_tab5$chromosome_name, seq_tab5$`5_utr_start`, seq_tab5$`5_utr_end`, sep=":")
+
+# get 3'TUR sequences
+seq_tab3 <- seqtab_allUTR_list$utr3
+inputseq3 <- DNAStringSet(seq_tab3$`3_utr_seq`)
+names(inputseq3) <- paste(seq_tab3$mgi_symbol, seq_tab3$chromosome_name, seq_tab3$`3_utr_start`, seq_tab3$`3_utr_end`, sep=":")
+```
+* 5'UTR
+```{r, eval=FALSE}
+        
+fimo_out_list_utr5 <- list()
+for (motif in RNAdb) {
+    motif_name <- motif["name"]
+    if(grepl("-5p", motif_name)){
+      print(motif_name)
+      set_dir = paste0(proj_path, "/results/motif_analysis/translation_reg_glucose_miRNA_motif_selected/fimo_out", "/", motif_name)
+      mkdir(set_dir, r=TRUE)
+      
+      fimo_out <- runFimo(inputseq5, motif, text=TRUE, outdir=set_dir)
+      fimo_out_list_utr5[[motif_name]] <- fimo_out
+}
+```
+* 3'UTR
+```{r, eval=FALSE}
+        
+fimo_out_list_utr3 <- list()
+for (motif in RNAdb) {
+    motif_name <- motif["name"]
+    if(grepl("-3p", motif_name)){
+      print(motif_name)
+      set_dir = paste0(proj_path, "/results/motif_analysis/translation_reg_glucose_miRNA_motif_selected/fimo_out", "/", motif_name)
+      mkdir(set_dir, r=TRUE)
+          
+      fimo_out <- runFimo(inputseq3, motif, text=TRUE, outdir=set_dir)
+      fimo_out_list_utr3[[motif_name]] <- fimo_out
+}
+```
+
+
+### Save Fimo output to a double list
+```{r, eval=FALSE}
+saveRDS(fimo_out_list_utr5, file="fimo_out_list_utr5.rds")
+saveRDS(fimo_out_list_utr3, file="fimo_out_list_utr3.rds")
+```
+
+```{r}
+fimo_out_list_utr5 <- readRDS("fimo_out_list_utr5.rds")
+fimo_out_list_utr3 <- readRDS("fimo_out_list_utr3.rds")
+```
+
+### Prepare data to plot (selected 20 motifs) {.tabset}
+* 5'UTR  
+```{r, eval=FALSE}
+
+all_motif_genes <- data.frame(matrix(ncol=7, nrow=0))
+for (motif_name in head(names(fimo_out_list_utr5),2000)) { ## all motifs
+    # print(motif_name)
+
+    motif <- fimo_out_list_utr5[[motif_name]]
+    motif_genes <- anota2seq[anota2seq$GeneSymbol %in% seqnames(motif), ] %>% dplyr::select(contains(c("GeneSymbol", "Glucose")))
+    motif_genes <- cbind(group=motif_name, motif_genes)
+    all_motif_genes <- rbind(all_motif_genes, motif_genes)
+
+    data5 <- rbind(all_motif_genes, cbind(group="all_gene", anota2seq %>% dplyr::select(contains(c("GeneSymbol", "Glucose")))))
+}
+
+```
+
+* 3'UTR. 
+```{r, eval=FALSE}
+
+all_motif_genes <- data.frame(matrix(ncol=7, nrow=0))
+for (motif_name in head(names(fimo_out_list_utr3),2000)) { ## all motifs
+    # print(motif_name)
+
+    motif <- fimo_out_list_utr3[[motif_name]]
+    motif_genes <- anota2seq[anota2seq$GeneSymbol %in% seqnames(motif), ] %>% dplyr::select(contains(c("GeneSymbol", "Glucose")))
+    motif_genes <- cbind(group=motif_name, motif_genes)
+    all_motif_genes <- rbind(all_motif_genes, motif_genes)
+
+    data3 <- rbind(all_motif_genes, cbind(group="all_gene", anota2seq %>% dplyr::select(contains(c("GeneSymbol", "Glucose")))))
+}
+
+```
+
+
+#### plot translation changes for miRNA binding genes (5'UTR)
+
+* Wilcoxon rank sum test for the miRNA binding genes vs. the rest of genes. 
+
+```{r}
+data5_1 <- readRDS("miRNA_motif_utr5.rds")
+```
+
+```{r, eval=FALSE}
+all_genes <- data5[data5$group == "all_gene",]
+
+data5_1 <- data.frame(matrix(ncol=12, nrow=0))
+for (each in unique(data5$group)[grepl("mmu",unique(data5$group))]){
+  binding_genes <- data5[data5$group == each,]
+  rest_genes <- all_genes[!all_genes$GeneSymbol %in% binding_genes$GeneSymbol,]
+  test_res1 <- wilcox.test(binding_genes$NoGlucose_translation.apvEff, rest_genes$NoGlucose_translation.apvEff, alternative="greater")
+  test_res2 <- wilcox.test(binding_genes$NoGlucose_translation.apvEff, rest_genes$NoGlucose_translation.apvEff, alternative="less")
+  p.value1 <- test_res1$p.value
+  p.value2 <- test_res2$p.value
+  p.value1 <- formatC(test_res1$p.value, format = "e", digits = 2)
+  p.value2 <- formatC(test_res2$p.value, format = "e", digits = 2)
+  # if (as.numeric(p.value) <= 0.05) {
+  #     cat(each, " p-value: ", p.value, "*\n")
+  #     binding_genes$wilcox.p <- paste0(p.value, " *")
+  #     
+  # } else {
+  #   cat(each, " p-value: ", p.value, "\n")
+  #     binding_genes$wilcox.p <- paste0(p.value, "")    
+  # }
+  binding_genes$wilcox_greater.p <- p.value1
+  binding_genes$wilcox_less.p <- p.value2
+  data5_1 <- rbind(data5_1, binding_genes)
+}
+data5_1_output <- data5_1[,-c(12,13)] %>% mutate(across(where(is.numeric), ~ round(., digits = 3)))
+write.table(data5_1_output, "anota2seq_tab_for_genes_grouped_by_miRNA_motif_on_5UTR.tsv",sep="\t", col.names=TRUE,row.names = FALSE,quote=FALSE)
+
+wilcox_stats <- data5_1 %>% group_by(group,wilcox_greater.p, wilcox_less.p) %>% count() %>% as.data.frame()
+colnames(wilcox_stats)[4] <- "n_genes"
+write.table(wilcox_stats, "translation_change_5UTR_miRNA_motif_genes_vs_allgene_wilcox_p.tsv", sep="\t", col.names=TRUE,row.names = FALSE,quote=FALSE)
+
+saveRDS(data5_1, file="miRNA_motif_utr5.rds")
+```
+
+
+* Plot with p-values and significance. 
+
+```{r, fig.height=8, fig.width=6}
+
+all_genes$wilcox.p <- "na"
+data5_1 <- rbind(data5_1, all_genes)
+p <- ggplot(data5_1, aes(x=group, y=NoGlucose_translation.apvEff)) +
+  geom_boxplot(notch = TRUE, notchwidth = 0.5, width=0.6, outlier.size = 0.5) +
+  theme_classic() +
+  theme(legend.position="none", axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = median(all_genes$NoGlucose_translation.apvEff), linetype = 2, color="red") +
+  ylab("Translation log2FC") +
+  xlab("Motif groups") +
+  ggtitle("miRNA binding on 5'UTR") +
+  ylim(-2,2) +
+
+# Add p-values on top
+ geom_text(
+    data = data5_1[,c(1,7,12)] %>% group_by(group, wilcox.p) %>% summarise(y = quantile(NoGlucose_translation.apvEff, 0.75)),
+    aes(y = y,label = wilcox.p), 
+    hjust = -0.1, 
+    vjust = -0.1,
+    size = 3, color="red",
+    stat = "unique", 
+    angle = 90
+  )
+
+print(p)
+```
+
+
+#### plot translation changes for miRNA binding genes (3'UTR)
+
+* Wilcoxon rank sum test for the miRNA binding genes vs. the rest of genes
+
+```{r}
+data3_1 <- readRDS("miRNA_motif_utr3.rds")
+```
+
+```{r}
+all_genes <- data3[data3$group == "all_gene",]
+
+data3_1 <- data.frame(matrix(ncol=12, nrow=0))
+for (each in unique(data3$group)[grepl("mmu",unique(data3$group))]){
+  binding_genes <- data3[data3$group == each,]
+  rest_genes <- all_genes[!all_genes$GeneSymbol %in% binding_genes$GeneSymbol,]
+  test_res1 <- wilcox.test(binding_genes$NoGlucose_translation.apvEff, rest_genes$NoGlucose_translation.apvEff, alternative="greater")
+  test_res2 <- wilcox.test(binding_genes$NoGlucose_translation.apvEff, rest_genes$NoGlucose_translation.apvEff, alternative="less")
+  p.value1 <- test_res1$p.value
+  p.value2 <- test_res2$p.value
+  p.value1 <- formatC(test_res1$p.value, format = "e", digits = 2)
+  p.value2 <- formatC(test_res2$p.value, format = "e", digits = 2)
+  # if (as.numeric(p.value) <= 0.05) {
+  #     cat(each, " p-value: ", p.value, "*\n")
+  #     binding_genes$wilcox.p <- paste0(p.value, " *")
+  #     
+  # } else {
+  #   cat(each, " p-value: ", p.value, "\n")
+  #     binding_genes$wilcox.p <- paste0(p.value, "")    
+  # }
+  binding_genes$wilcox_greater.p <- p.value1
+  binding_genes$wilcox_less.p <- p.value2
+  data3_1 <- rbind(data3_1, binding_genes)
+}
+data3_1_output <- data3_1[,-c(12,13)] %>% mutate(across(where(is.numeric), ~ round(., digits = 3)))
+write.table(data3_1_output, "anota2seq_tab_for_genes_grouped_by_miRNA_motif_on_3UTR.tsv",sep="\t", col.names=TRUE,row.names = FALSE,quote=FALSE)
+
+wilcox_stats <- data3_1 %>% group_by(group,wilcox_greater.p, wilcox_less.p) %>% count() %>% as.data.frame()
+colnames(wilcox_stats)[4] <- "n_genes"
+write.table(wilcox_stats, "translation_change_3UTR_miRNA_motif_genes_vs_allgene_wilcox_p.tsv", sep="\t", col.names=TRUE,row.names = FALSE,quote=FALSE)
+
+saveRDS(data3_1, file="miRNA_motif_utr3.rds")
+```
+
+* Plot with p-values and significance.  
+```{r, fig.height=8, fig.width=6}
+
+all_genes$wilcox.p <- "na"
+data3_1 <- rbind(data3_1, all_genes)
+
+p <- ggplot(data3_1, aes(x=group, y=NoGlucose_translation.apvEff)) +
+  geom_boxplot(notch = TRUE, notchwidth = 0.3, width=0.6,outlier.size = 0.5) +
+  theme_classic() +
+  theme(legend.position="none", axis.text.x = element_text(angle = 45, hjust = 1), plot.title = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = median(all_genes$NoGlucose_translation.apvEff), linetype = 2, color="red") +
+  ylab("Translation log2FC") +
+  xlab("Motif groups") +
+  ggtitle("miRNA binding on 3'UTR") +
+  ylim(-2,2) +
+  # Add p-values on top
+ geom_text(
+    data = data3_1[,c(1,7,12)] %>% group_by(group, wilcox.p) %>% summarise(y = quantile(NoGlucose_translation.apvEff, 0.75)),
+    aes(y = y,label = wilcox.p), 
+    hjust = -0.1, 
+    vjust = -0.1,
+    size = 3, color="red",
+    stat = "unique", 
+    angle = 90
+  )
+print(p)
+```
+
+
+
+
+
+
+
+
+

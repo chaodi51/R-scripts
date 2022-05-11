@@ -1,0 +1,526 @@
+---
+title: "Co-expression network analysis"
+author: "Chao Di, dic@email.chop.edu"
+output:
+  html_document:
+    number_sections: false
+    code_folding: show
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, 
+                      warning = FALSE, 
+                      tidy = TRUE
+                      # fig.width = 10, 
+                      # tidy.opts = list(width.cutoff = 95)
+                      )
+```
+
+Introduction
+============
+This is the tutorial from [V. Keith Hughitt]
+(https://github.com/iscb-dc-rsg/2016-summer-workshop/tree/master/3B-Hughitt-RNASeq-Coex-Network-Analysis/tutorial#references). I directly apply it to our Polysome Profiling data. Needs more calibration on the parameters for building and exporting the network. 
+
+### Overview
+
+Here are the main steps we are going to cover in this tutorial:
+
+1. Data preparation
+	- low-count filtering
+	- log-transforming data
+2. Differential expression analysis
+	- filtering out non-differentially-expressed genes
+3. Co-expression network construction
+4. Detection of co-expression modules
+4. Exporting a network for external visualization
+
+### Dataset
+Polysome profiling for nutrients deprivation data.
+
+Setup
+=====
+
+```{r include=FALSE}
+library(gplots)
+library(ggplot2)
+library(knitr)
+library(limma)
+library(reshape2)
+library(RColorBrewer)
+library(WGCNA)
+library(dplyr)
+# Make sure results are reproducible
+set.seed(1)
+```
+
+Load the sample metadata file from the current directory.
+
+```{r, load_metadata}
+samples <- read.table("sample_table.tsv", header=TRUE, row.names="sample",sep="\t", check.names=FALSE)
+rownames(samples) <- rownames(samples) %>% sub("..-","",.) %>% gsub("-",".",.)
+samples <- samples[order(rownames(samples)),] # reorder by row names
+head(samples)
+samples$condition <- factor(samples$condition)
+samples$source <- factor(samples$source)
+
+```
+
+Next, we will load our RNA-Seq read counts.
+
+```{r load data}
+raw_counts <- read.table("all_readCount.tsv", header=TRUE, row.names = 1, sep="\t")
+colnames(raw_counts) <- colnames(raw_counts) %>% sub(".bam","",.) %>% sub("X..\\.","",.)
+raw_counts <- raw_counts[,order(colnames(raw_counts))] # reorder by column names
+head(raw_counts)[,1:5]
+```
+
+For gene annotations, we can use the Bioconductor `Homo.sapiens` OrganismDb
+package.  This meta-package combines several Human-specific annotation
+packages, providing gene- and transcript-level details.
+
+```{r, include=FALSE}
+library(Mus.musculus)
+```
+
+OrganismDb packages can be queried in a manner similar to querying a database.
+You have to specify one or more gene identifiers ('keys'), along with the type
+of the identifier ('key type'), and one or more fields that you are interested
+in querying.
+
+```{r}
+keytypes(Mus.musculus)
+columns(Mus.musculus)
+```
+
+To query the package, you use the `select()` function, e.g.:
+
+```{r}
+# Example query
+gene_ids <- head(keys(Mus.musculus, keytype='SYMBOL'), 1)
+AnnotationDbi::select(Mus.musculus, keytype='SYMBOL', keys=gene_ids, 
+	   columns=c('ALIAS', 'TXCHROM', 'TXSTART', 'TXEND'))
+```
+
+Data Preparation
+================
+
+### Sample check
+
+First, it is always wise to check the quality of your samples before continuing
+with an analysis like this. There are many such checks that one can (and should)
+perform, starting at the level of read quality (e.g. FastQC).
+
+Here, we will just do a quick check using a sample-correlation heatmap.
+
+```{r sample_heatmap}
+# add a colorbar along the heatmap with sample condition
+num_conditions <- nlevels(samples$condition)
+pal <- colorRampPalette(brewer.pal(num_conditions, "Set1"))(num_conditions)
+cond_colors <- pal[as.integer(samples$condition)]
+heatmap.2(cor(raw_counts), RowSideColors=cond_colors, margins=c(12,12),
+		  trace='none', main='Sample correlations (raw)')
+```
+
+### Low count filtering
+
+Now that we are satisfied with the quality of our samples, we will want to
+filter our data to keep only the genes which will be informative during
+differential expression analysis and network construction.
+
+```{r}
+# Remove all rows with less than n counts across all samples, where n=#samples
+low_count_mask <- rowSums(raw_counts) < ncol(raw_counts)
+sprintf("Removing %d low-count genes (%d remaining).", sum(low_count_mask), 
+		sum(!low_count_mask))
+```
+
+### Log2 transformation
+
+Most of the methods developed for co-expression network analysis and network 
+inference were written for use with microarray data, including WGCNA!
+
+Attempting to apply a method such as this to discrete-count RNA-Seq data
+will not work out well.
+
+There are a number of methods for working around this, in effect, making 
+RNA-Seq data "look" more like microarray data, but the simplest thing is just
+to _log_ the data. This will transform our discrete, over-dispersed counts
+to a more Poisson-like continuous distribution.
+
+```{r}
+log_counts <- log2(raw_counts + 1)
+```
+
+Let's see how things look after logging the data.
+
+```{r sample_density_plot}
+x = melt(as.matrix(log_counts))
+colnames(x) = c('gene_id', 'sample', 'value')
+ggplot(x, aes(x=value, color=sample)) + geom_density() + theme(legend.position="no")
+```
+
+```{r log2_sample_heatmap}
+heatmap.2(cor(log_counts), RowSideColors=cond_colors, margins=c(12,12),
+		  trace='none', main='Sample correlations (log2-transformed)')
+```
+As you can see, after the low-count filtering and log-transformation, the 
+samples within each condition are starting to behave better.
+
+### Remove non differentially-expressed genes
+
+Next, we will perform a series of differential expression contrasts, and use
+the results to further filter out genes for which there is not a significant
+amount of variance. 
+
+If you were _just_ interested in performing differential expression analysis,
+this may not be the most appropriate approach. In this case, you may want to
+consider additional steps such as [quantile normalization](https://en.wikipedia.org/wiki/Quantile_normalization) and/or mean-variance
+adjustment with [voom](http://link.springer.com/article/10.1186/gb-2014-15-2-r29).
+
+
+```{r diffexpr_filtering}
+# first, let's remove any genes with _zero_ variance since these are not
+# going to help us, and may cause problems with some of the models
+log_counts <- log_counts[!low_count_mask,]
+log_counts <- log_counts[apply(log_counts, 1, var) > 0,]
+
+# create design matrix for differential expression analysis;
+# if you wanted to account for batch here, you could simply include a batch
+# term in the linear model at this step, e.g.:
+# mod <- model.matrix(~0+samples$condition+samples$batch)
+mod <- model.matrix(~0+samples$condition)
+# make model terms easier to work with
+colnames(mod) <- levels(samples$condition)
+fit <- lmFit(log_counts, design=mod)
+# generate a list of all possible pairwise contrasts
+condition_pairs <- t(combn(levels(samples$condition), 2))                                                                                                                               
+                                                                                                                                                                             
+comparisons <- list()                                                                                                                                          
+for (i in 1:nrow(condition_pairs)) {                                                                                                                                     
+    comparisons[[i]] <- as.character(condition_pairs[i,])                                                                                                      
+}    
+# vector to store de genes
+sig_genes <- c()
+# iterate over the contrasts, and perform a differential expression test for
+# each pair
+for (conds in comparisons) {
+    # generate string contrast formula, "infLM24 - infLM4"
+    contrast_formula <- paste(conds, collapse=' - ')
+    contrast_mat <- makeContrasts(contrasts=contrast_formula, levels=mod)
+    contrast_fit <- contrasts.fit(fit, contrast_mat)
+    eb <- eBayes(contrast_fit)
+    # Grab highly ranked genes; this is a pretty stringent p-value cutoff, but
+    # it serves to limit the total number of genes we will use for this
+    # tutorial
+    sig_genes <- union(sig_genes, 
+                       rownames(topTable(eb, number=Inf, p.value=0.05)))
+}
+# Filter out genes which were not differentially expressed for any contrast
+log_counts <- log_counts[rownames(log_counts) %in% sig_genes,]
+```
+
+### Co-expression network construction
+
+#### Construct similarity matrix
+
+Now, we are ready to start constructing our co-expression network. The first
+step is to generate a correlation, or more generally, a similarity matrix.
+
+For this, we could use any similarity metric: Pearson correlation, Biweight
+mid-correlation, mutual information, etc.
+
+Here, we will use a metric that I have created which combines some
+of the benefits from both Pearson correlation and Euclidean Distance.
+
+For a data matrix $X$ with observations as columns (samples) and features for
+rows (genes), the feature-feature similarity matrix $S$ is computed as:
+
+$$
+S = sign(cor(X)) \times \frac{|cor(X)| + (1 - \frac{log(dist(X) + 1)}{max(log(dist(X) + 1))})}{2}
+$$
+
+Where the `cor` returns the Pearson correlation matrix for the input matrix,
+and the `dist` function returns the Euclidean distance matrix for the input
+matrix.
+
+The LHS of the equation is simply the sign of the correlation function, which
+serves to preserve the sign of the interaction. The RHS combines the Pearson
+correlation and the log inverse Euclidean distance with equal weights.
+
+The result is a number in the range $[-1,1]$, where values close to $-1$
+indicate a strong negative correlation and values close to $1$ indicate a
+strong positive corelation.
+
+While the Pearson correlation and Euclidean distance each contribute equally in
+the above equation, one could also assign tuning parameters to each of the
+metrics to allow for unequal contributions, e.g.:
+
+$$
+S = sign(cor(X)) \times (\alpha |cor(X)| + \beta (1 - \frac{log(dist(X) + 1)}{max(log(dist(X) + 1))}))
+$$
+
+Where $\alpha$ and $\beta$ each range from $[0,1]$ and sum to 1.
+
+```{r cor_dist}
+#'
+#' Similarity measure which combines elements from Pearson correlation and
+#' Euclidean distance.
+#' 
+cordist <- function(dat) {
+    cor_matrix  <- cor(t(dat))
+    dist_matrix <- as.matrix(dist(dat, diag=TRUE, upper=TRUE))
+    dist_matrix <- log1p(dist_matrix)
+    dist_matrix <- 1 - (dist_matrix / max(dist_matrix))
+    sign(cor_matrix) * ((abs(cor_matrix) + dist_matrix)/ 2)
+}
+```
+
+```{r sim_matrix}
+sim_matrix <- cordist(log_counts)
+```
+
+Let's see what our similarity matrix looks like at this point. Because the
+`heatmap.2` function (which includes a biclustering step) can be pretty slow,
+we will use a sub-sample of our data -- for visualization purposes this is
+fine.
+
+```{r sim_matrix_heatmap}
+heatmap_indices <- sample(nrow(sim_matrix), 500)
+heatmap.2(t(sim_matrix[heatmap_indices, heatmap_indices]),
+            col=redgreen(75),
+            labRow=NA, labCol=NA, 
+            trace='none', dendrogram='row',
+            xlab='Gene', ylab='Gene',
+            main='Similarity matrix',
+            density.info='none', revC=TRUE)
+```
+
+#### Construct adjacency matrix
+
+Next, we will convert similarity matrix to an adjacency matrix.
+
+For this, we will use the power transformation, as suggested by Zhang and
+Horvath (2005).
+
+This will help us to reduce the number of spurious correlations in the data.
+
+Additionally, in order to separate clusters of genes which have a strong
+positive correlation from those with a strong negative correlation, we will
+first shift the data from the range [-1,1] to [0,1].
+
+The combined transformation is:
+
+$$
+a_{ij} = \left(\frac{1}{2} (1 + s_{ij})\right)^\gamma
+$$
+
+Some additional reading regarding the use of power transformation:
+
+1. [http://labs.genetics.ucla.edu/horvath/CoexpressionNetwork/Rpackages/WGCNA/faq.html](WGCNA FAQ) (E.g. item #5)
+2. [https://support.bioconductor.org/p/66101/#66195](Bioconductor Support - Question: Theoretical WGCNA Question)
+
+```{r construct_adjacency_matrix}
+# Construct adjacency matrix
+adj_matrix <- adjacency.fromSimilarity(sim_matrix, power=12, type='signed')
+# Delete similarity matrix to free up memory
+rm(sim_matrix)
+gc()
+# Convert to matrix
+gene_ids <- rownames(adj_matrix)
+adj_matrix <- matrix(adj_matrix, nrow=nrow(adj_matrix))
+rownames(adj_matrix) <- gene_ids
+colnames(adj_matrix) <- gene_ids
+```
+
+Same plot as before, but now for our adjacency matrix:
+
+```{r adjacency_matrix_heatmap}
+heatmap.2(t(adj_matrix[heatmap_indices, heatmap_indices]),
+            col=redgreen(75),
+            labRow=NA, labCol=NA, 
+            trace='none', dendrogram='row',
+            xlab='Gene', ylab='Gene',
+            main='Adjacency matrix',
+            density.info='none', revC=TRUE)
+```
+
+### Co-expression module detection
+
+At this point, we already have our co-expression network. We could simply
+threshold the adjacency matrix, export the remaining edges, and load it into
+Cytoscape for visualization.
+
+Before we do that, however, let's first try and detect co-expression modules in
+the network.
+
+For this, we will use hierarchical clustering following by branch-cutting.
+
+```{r module_detection}
+# Cluster gene expression profiles; the flashClust function from
+# the authors of WGCNA is another options for larger datasets.
+# For input, we use the reciprocal of the adjacency matrix; hierarchical
+# clustering works by comparing the _distance_ between objects instead of the
+# _similarity_.
+gene_tree <- hclust(as.dist(1 - adj_matrix), method="average")
+# we will use the cuttreeDynamicTree method to break apart the hc dendrogram
+# into separate modules
+module_labels <- cutreeDynamicTree(dendro=gene_tree, minModuleSize=15,
+                                   deepSplit=TRUE)
+# assign a color to each module for easier visualization and referencing
+module_colors <- labels2colors(module_labels)
+```
+
+### Exporting the network
+
+Another helper function for exporting our network to the metadata-rich GraphML
+format...
+
+```{r export_graphml}
+#' Converts an adjaceny matrix along with some optional vertex and edge
+#'  information to a GraphML graph and saves it to disk.
+#'
+#' @param adj_mat An n-by-n weighted or unweighted adjacency matrix normalized
+#' to contain values between 0 and 1.
+#' @param filename Name of file to save output to. If file already exists it
+#' will be overwritten. (default: network.graphml)
+#' @param weighted Whether or not the adjacency matrix should be treated as a 
+#' weighted graph. (default: TRUE)
+#' @param threshold For weighted networks, if a threshold value between 0 and 
+#' 1 is specified, all edges with weights below that value with be dropped from
+#'   the graph. (default: 0.5)
+#' @param max_edge_ratio The maximum number of edges per node in the network to
+#' allow. If the number of edges that would remain for the specified threshold
+#' exceeds this value, the threshold will be raised to reduce the number of
+#' edges remaining. (default: 3)
+#' @param nodeAttr A vector with length equal to the number of vertices in the 
+#' network, where the ith entry in the vector corresponds to some numeric or 
+#' string annotation that should be associated with the ith node in the 
+#' adjacency matrix. (default: NULL)
+#' @param nodeAttrDataFrame A data frame containing one or more columns 
+#' associated with the vertices in the graph.  The ith row of the dataframe 
+#' should correspond to the ith entry in the adjacency matrix. (default: NULL)
+#' @param edgeAttributes Extra attributes to associate with the graph edges,
+#' formatted as a list of matrices of the same dimension and names as the
+#' adjacency matrix.
+#'
+#' Examples
+#' --------
+#' export_network_to_graphml(adj_mat, filename='~/network.graphml',
+#'                           threshold=0.3, nodeAttrDataFrame=df)
+#'
+#' See Also
+#' --------
+#' 1. http://www.inside-r.org/packages/cran/WGCNA/docs/exportNetworkToCytoscape
+#' 2. http://graphml.graphdrawing.org/
+#'
+#' Returns
+#' -------
+#' An igraph graph object representing the exported graph.
+export_network_to_graphml <- function (adj_mat, filename=NULL, weighted=TRUE,
+                                       threshold=0.5, max_edge_ratio=3,
+                                       nodeAttr=NULL, nodeAttrDataFrame=NULL,
+                                       edgeAttributes=NULL, verbose=FALSE) {
+    library('igraph')
+    # Determine filename to use
+    if (is.null(filename)) {
+        filename='network.graphml'
+    }
+    # TODO 2015/04/09
+    # Add option to rescale correlations for each module before applying
+    # threshold (this is simpler than the previous approach of trying to
+    # determine a different threshold for each module)
+    #
+    # Still, modules with very low correlations should be given somewhat
+    # less priority than those with very high correlations.
+    #module_colors <- unique(nodeAttrDataFrame$color)
+    #module_genes <- which(nodeAttrDataFrame$color == color)
+    #module_adjmat <- adj_mat[module_genes,]
+    #num_genes <- length(module_genes)
+    # Adjust threshold if needed to limit remaining edges
+    max_edges <- max_edge_ratio * nrow(adj_mat)
+    edge_to_total_ratio <- max_edges / length(adj_mat)
+    edge_limit_cutoff <- as.numeric(quantile(abs(adj_mat), 1 - edge_to_total_ratio))
+    # Also choose a minimum threshold to make sure that at least some edges
+    # are left
+    min_threshold <- as.numeric(quantile(abs(adj_mat), 0.9999))
+    threshold <- min(min_threshold, max(threshold, edge_limit_cutoff))
+    # Remove edges with weights lower than the cutoff
+    adj_mat[abs(adj_mat) < threshold] <- 0
+    # Drop any genes with no edges (TODO: Make optional)
+    orphaned <- (colSums(adj_mat) == 0)
+    adj_mat <- adj_mat[!orphaned, !orphaned]
+    # Also remove annotation entries
+    if (!is.null(nodeAttr)) {
+        nodeAttr <- nodeAttr[!orphaned]
+    }
+    if (!is.null(nodeAttrDataFrame)) {
+        nodeAttrDataFrame <- nodeAttrDataFrame[!orphaned,]
+    }
+    # Keep track of non-positive edges and rescale to range 0,1
+    is_zero     <- adj_mat == 0
+    is_negative <- adj_mat < 0
+    adj_mat <- (abs(adj_mat) - threshold) / (max(adj_mat) - threshold)
+    adj_mat[is_zero] <- 0
+    adj_mat[is_negative] <- -adj_mat[is_negative]
+    if (verbose) {
+        message(sprintf("Outputting matrix with %d nodes and %d edges", 
+                        nrow(adj_mat), sum(adj_mat > 0)))
+    }
+    # Create a new graph and add vertices
+    # Weighted graph
+    if (weighted) {
+        g <- graph.adjacency(adj_mat, mode='undirected', weighted=TRUE, diag=FALSE)
+    } else {
+        adj_mat[adj_mat != 0] <- 1
+        g <- graph.adjacency(adj_mat, mode='undirected', diag=FALSE)
+    }
+    # Add single node annotation from vector
+    if (!is.null(nodeAttr)) {
+        g <- set.vertex.attribute(g, "attr", value=nodeAttr)
+    }
+    # Add node one or more node annotations from a data frame
+    if (!is.null(nodeAttrDataFrame)) {
+        for (colname in colnames(nodeAttrDataFrame)) {
+            g <- set.vertex.attribute(g, colname, value=nodeAttrDataFrame[,colname])
+        }
+    }
+    edge_correlation_negative <- c()
+    # neg_correlations[edge_list]
+    edge_list <- get.edgelist(g)
+    for (i in 1:nrow(edge_list)) {
+        from <- edge_list[i, 1]    
+        to   <- edge_list[i, 2]    
+    }
+    
+    # Save graph to a file
+    write.graph(g, filename, format='graphml')
+    # return igraph
+    return(g)
+}
+```
+
+```{r export_network}
+# use OrganismDb to retrieve gene annotations
+gene_info <- AnnotationDbi::select(Mus.musculus, keytype='SYMBOL', keys=rownames(log_counts),
+                    columns=c('TXCHROM', 'TXSTRAND', 'GENENAME'))
+colnames(gene_info) <- c('gene_name', 'description', 'chr', 'strand')
+# for now, just grab the description for the first transcript
+gene_info <- gene_info[!duplicated(gene_info$gene_name),]
+gene_info <- cbind(gene_info, module=module_colors)
+# Include RGB versions of module colors for better assignment in Cytoscape
+gene_info$color_rgb <- col2hex(gene_info$module)
+# first, it's a good idea to check the distribution of edges weights in our
+# correlation matrix. This will help us choose a reasonable cutoff for
+# exporting the network.
+g <- export_network_to_graphml(adj_matrix, filename='./network.graphml',
+                               threshold=0.4, nodeAttrDataFrame=gene_info)
+```
+
+Version Information
+===================
+
+```{r}
+sessionInfo()
+```
